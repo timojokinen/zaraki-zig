@@ -319,7 +319,7 @@ pub const Position = struct {
                 }
             }
 
-            if (to_bb & ~all_pieces_bb != 0) {
+            if (to_bb & ~all_pieces_bb & ~promotion_rank != 0) {
                 to_sq = @intCast(@as(i8, to_sq) + 8 * pawn_direction);
                 if (@as(u64, 1) << to_sq & ~all_pieces_bb & pin_mask & check_mask != 0 and from_bb & utils.relativeRank(1, ally_color) != 0) {
                     move_list.appendAssumeCapacity(.{ .flags = MoveFlags.DOUBLE_PAWN_PUSH, .from_sq = from_sq, .to_sq = to_sq });
