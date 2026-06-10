@@ -5,6 +5,7 @@ const Position = @import("position.zig").Position;
 const createPositionFromFEN = @import("position.zig").createPositionFromFEN;
 const perft = @import("perft.zig").perft;
 const Move = @import("move.zig").Move;
+const MoveList = @import("move.zig").MoveList;
 const MoveFlags = @import("move.zig").MoveFlags;
 
 const SupportedCommands = enum {
@@ -47,7 +48,9 @@ fn applyUciMove(position: *Position, move_str: []const u8) !void {
     const from_sq = try utils.san2idx(move_str[0..2]);
     const to_sq = try utils.san2idx(move_str[2..4]);
     const promo_char: u8 = if (move_str.len >= 5) move_str[4] else 0;
-    const move_list = try position.generateMoves();
+
+    var move_list = MoveList{};
+    try position.generateMoves(&move_list);
     for (move_list.moves[0..move_list.count]) |m| {
         if (m.move.from_sq != from_sq or m.move.to_sq != to_sq) continue;
         if (promo_char != 0) {

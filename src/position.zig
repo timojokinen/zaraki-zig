@@ -3,6 +3,7 @@ const std = @import("std");
 const tables = @import("tables.zig");
 const attacks = @import("attacks.zig");
 const BoardState = @import("fen.zig").BoardState;
+
 const Move = @import("move.zig").Move;
 const MoveList = @import("move.zig").MoveList;
 const MoveFlags = @import("move.zig").MoveFlags;
@@ -14,6 +15,7 @@ const printBitboard = utils.printBitboard;
 const Color = utils.Color;
 const Bitboard = utils.Bitboard;
 const CastlingRights = @import("fen.zig").CastlingRights;
+const zobrist = @import("zobrist.zig");
 const enumerateBitboard = utils.enumerateBitboard;
 
 pub fn boardStateToPieceBitboards(board_state: BoardState) [12]Bitboard {
@@ -49,6 +51,32 @@ pub const Position = struct {
     bbs: [12]Bitboard = .{0} ** 12,
     undo_stack: [256]UndoInfo = undefined,
     undo_index: u8 = 0,
+    hash: u64 = undefined,
+
+    pub fn applyFEN(fen: []const u8) !void {
+        const board_state = try parseFen(fen);
+
+        var bbs: [12]Bitboard = .{0} ** 12;
+        var hash: u64 = 0;
+
+        if (board_state.side_to_move == .Black) hash ^= zobrist.black_key;
+        for (0..8) |rank| {
+            inner: for (0..8) |file| {
+                if (board_state.mat_8x8[rank][file] == 0) continue :inner;
+                const square: u6 = @intCast(rank * 8 + file);
+                const piece: Piece = @bitCast(board_state.mat_8x8[rank][file]);
+                const bb_idx = @intFromEnum(piece.type()) + (@as(u4, (if (piece.white) 0 else 6)));
+                bbs[bb_idx] |= @as(u64, 1) << @intCast(square);
+                hash ^= zobrist.piece_keys[bb_idx][square];
+            }
+        }
+
+        hash ^= zobrist.castling_rights_keys[@intCast(board_state.castling_rights)];
+
+        if (board_state.en_passant_square) |ep_sq| {
+            hash ^= zobrist.ep_keys[ep_sq & 7];
+        }
+    }
 
     pub fn makeMove(self: *Position, move: Move) !void {
         const piece_type: ?PieceType = self.pieceAt(move.from_sq);
@@ -205,7 +233,8 @@ pub const Position = struct {
         return king_attackers > 0;
     }
 
-    pub fn generateMoves(self: Position) !MoveList {
+    pub fn generateMoves(self: Position, move_list: *MoveList) !void {
+        move_list.count = 0;
         const ally_color: Color = self.board_state.side_to_move;
         const color_offset: usize = if (ally_color == Color.Black) 6 else 0;
         const opp_color_offset: usize = if (ally_color == Color.Black) 0 else 6;
@@ -217,8 +246,6 @@ pub const Position = struct {
         const opp_attacks: Bitboard = attacks.pieceAttacks(ally_color.opp(), self.bbs, all_pieces_bb ^ king_bb);
         const king_attackers: Bitboard = attacks.squareAttackers(king_sq, ally_color.opp(), self.bbs, all_pieces_bb);
         const checkers_count = @popCount(king_attackers);
-
-        var move_list: MoveList = .{};
 
         {
             const att: Bitboard = tables.lookupKingAttacks(king_sq) & ~ally_pieces_bb & ~opp_attacks;
@@ -278,7 +305,7 @@ pub const Position = struct {
             }
         }
 
-        if (checkers_count >= 2) return move_list;
+        if (checkers_count >= 2) return;
 
         const rook_queen_pinners = attacks.xRayRookAttacks(@intCast(@ctz(king_bb)), all_pieces_bb, ally_pieces_bb) & (self.bbs[@intFromEnum(PieceType.Queen) + opp_color_offset] | self.bbs[@intFromEnum(PieceType.Rook) + opp_color_offset]);
         const bishop_queen_pinners = attacks.xRayBishopAttacks(@intCast(@ctz(king_bb)), all_pieces_bb, ally_pieces_bb) & (self.bbs[@intFromEnum(PieceType.Queen) + opp_color_offset] | self.bbs[@intFromEnum(PieceType.Bishop) + opp_color_offset]);
@@ -485,6 +512,6 @@ pub const Position = struct {
             }
         }
 
-        return move_list;
+        return;
     }
 };

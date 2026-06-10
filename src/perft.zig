@@ -1,11 +1,13 @@
 const Move = @import("move.zig").Move;
+const MoveList = @import("move.zig").MoveList;
 const std = @import("std");
 const Position = @import("position.zig").Position;
 const createPositionFromFEN = @import("position.zig").createPositionFromFEN;
 const utils = @import("utils.zig");
 
 pub fn perft(position: *Position, depth: usize) !usize {
-    const move_list = try position.generateMoves();
+    var move_list = MoveList{};
+    try position.generateMoves(&move_list);
 
     var total: usize = 0;
     for (move_list.moves[0..move_list.count]) |m| {
@@ -22,7 +24,8 @@ pub fn perft(position: *Position, depth: usize) !usize {
 }
 
 fn perftInner(position: *Position, depth: usize) !usize {
-    const move_list = try position.generateMoves();
+    var move_list = MoveList{};
+    try position.generateMoves(&move_list);
 
     if (depth == 1) return move_list.count;
     if (depth == 0) return 1;

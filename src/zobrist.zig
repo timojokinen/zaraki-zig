@@ -2,10 +2,10 @@ const std = @import("std");
 
 const SEED: u64 = 8730124647094862553;
 
-var piece_keys: [12][64]u64 = undefined;
-var castling_rights_keys: [16]u64 = undefined;
-var black_key: u64 = undefined;
-var ep_keys: [8]u64 = undefined;
+pub var piece_keys: [12][64]u64 = undefined;
+pub var castling_rights_keys: [16]u64 = undefined;
+pub var black_key: u64 = undefined;
+pub var ep_keys: [8]u64 = undefined;
 
 pub fn initZobristKeys() void {
     var prng = std.Random.SplitMix64.init(SEED);
