@@ -29,6 +29,10 @@ pub const TranspositionTable = struct {
     pub fn deinit(self: *TranspositionTable) void {
         self.allocator.free(self.entries);
     }
+
+    pub fn clear(self: *TranspositionTable) void {
+        @memset(self.entries, std.mem.zeroes(TTEntry));
+    }
 };
 
 pub const NodeType = enum(u2) { NONE, EXACT, UPPERBOUND, LOWERBOUND };

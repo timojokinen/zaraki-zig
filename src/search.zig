@@ -16,6 +16,8 @@ const MAX_PLY: usize = 128;
 pub const Searcher = struct {
     tt: *TranspositionTable,
     allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
     tt_size_mb: usize = 64,
 
     pv: [MAX_PLY][MAX_PLY]Move = std.mem.zeroes([MAX_PLY][MAX_PLY]Move),
@@ -25,9 +27,12 @@ pub const Searcher = struct {
     saved_pv_length: usize = 0,
 
     move_lists: [MAX_PLY]MoveList = std.mem.zeroes([MAX_PLY]MoveList),
+    nodes: usize = 0,
 
     pub fn think(self: *Searcher, position: *Position, max_depth: usize) !Move {
         if (max_depth == 0) return error.InvalidDepth;
+        self.nodes = 0;
+        const start = std.Io.Clock.now(.awake, self.io);
         self.saved_pv_length = 0;
         var d: usize = 1;
         while (d <= max_depth) : (d += 1) {
@@ -35,6 +40,17 @@ pub const Searcher = struct {
 
             self.saved_pv_length = self.pv_length[0];
             @memcpy(self.saved_pv[0..self.saved_pv_length], self.pv[0][0..self.saved_pv_length]);
+            const elapsed_ns = start.durationTo(std.Io.Clock.now(.awake, self.io)).toNanoseconds();
+            const elapsed_ms = @divTrunc(elapsed_ns, 1_000_000);
+            const nps = if (elapsed_ns > 0)
+                @divTrunc(self.nodes * 1_000_000_000, @as(u64, @intCast(elapsed_ns)))
+            else
+                0;
+
+            try self.stdout.print("info depth {} nodes {} time {} nps {}\n", .{
+                d, self.nodes, elapsed_ms, nps,
+            });
+            try self.stdout.flush();
         }
 
         return self.pv[0][0];
@@ -44,7 +60,8 @@ pub const Searcher = struct {
         self.pv_length[ply] = 0;
 
         if (depth == 0) return quiescenceSearch(self, position, alpha, beta, ply);
-        // TT PROBE
+
+        self.nodes += 1;
         const tt_entry = self.tt.get(position.hash);
         const hash_move: ?Move = if (tt_entry.node_type != .NONE) tt_entry.hash_move else null;
 
@@ -123,6 +140,7 @@ pub const Searcher = struct {
     }
 
     fn quiescenceSearch(self: *Searcher, position: *Position, alpha_: i32, beta: i32, ply: usize) !i32 {
+        self.nodes += 1;
         const static_eval = eval(position);
         if (static_eval >= beta) return static_eval;
         var alpha: i32 = if (static_eval > alpha_) static_eval else alpha_;

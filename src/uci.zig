@@ -79,9 +79,10 @@ fn mb_to_tt_size(mb: usize) usize {
 }
 
 pub fn uciInterface(io: std.Io, allocator: std.mem.Allocator) !void {
-    var stdout_buf: [1024]u8 = undefined;
+    var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_writer.interface;
+    defer stdout.flush() catch {};
 
     var stdin_buf: [4096]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
@@ -93,7 +94,8 @@ pub fn uciInterface(io: std.Io, allocator: std.mem.Allocator) !void {
 
     const tt_size = mb_to_tt_size(DEFAULT_TT_SIZE_MB);
     var tt: TranspositionTable = try .init(allocator, tt_size);
-    var searcher: Searcher = .{ .allocator = allocator, .tt = &tt };
+    defer tt.deinit();
+    var searcher: Searcher = .{ .allocator = allocator, .tt = &tt, .io = io, .stdout = stdout };
 
     while (true) {
         defer stdout.flush() catch {};
@@ -112,8 +114,12 @@ pub fn uciInterface(io: std.Io, allocator: std.mem.Allocator) !void {
                 try stdout.writeAll("id name Zaraki\n");
                 try stdout.writeAll("id author Timo Jokinen\n");
                 try stdout.writeAll("uciok\n");
+                try stdout.flush();
             },
-            .isready => try stdout.writeAll("readyok\n"),
+            .isready => {
+                try stdout.writeAll("readyok\n");
+                try stdout.flush();
+            },
             .ucinewgame => {
                 position = try createPositionFromFEN(startpos_fen);
             },
@@ -170,6 +176,7 @@ pub fn uciInterface(io: std.Io, allocator: std.mem.Allocator) !void {
                 if (perft_depth) |pd| {
                     _ = try perft(&position, pd);
                 } else {
+                    tt.clear();
                     const best_move = try searcher.think(&position, depth);
                     var move_buf: [5]u8 = undefined;
                     const move_str = moveToUci(best_move, &move_buf);
