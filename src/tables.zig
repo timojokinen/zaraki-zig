@@ -19,6 +19,8 @@ var black_pawns_masks: [64]u64 = undefined;
 
 var squares_between: [64][64]u64 = undefined;
 
+var lmr: [64][64]usize = undefined;
+
 pub fn lookupPawnAttacks(sq: u6, color: utils.Color) utils.Bitboard {
     return switch (color) {
         utils.Color.White => white_pawns_masks[@intCast(sq)],
@@ -52,6 +54,10 @@ pub fn lookupQueenAttacks(sq: u6, occupancy: utils.Bitboard) utils.Bitboard {
 
 pub fn lookupSquaresBetween(sq: u6, sq2: u6) utils.Bitboard {
     return squares_between[sq][sq2];
+}
+
+pub fn lookupLmrReduction(depth: u6, move_idx: u6) usize {
+    return lmr[depth][move_idx];
 }
 
 pub fn initTables() void {
@@ -127,6 +133,13 @@ pub fn initTables() void {
             const high: u6 = @intCast(@max(sq, sq2));
             const line: utils.Bitboard = if (same_file != 0) utils.maskFile(@intCast(sq)) else if (same_rank != 0) utils.maskRank(@intCast(sq)) else if (same_diag != 0) utils.maskDiag(@intCast(sq)) else if (same_anti_diag != 0) utils.maskAntiDiag(@intCast(sq)) else unreachable;
             squares_between[sq][sq2] = line & ((@as(u64, 1) << high) - 1) & ~((@as(u64, 1) << (low + 1)) - 1);
+        }
+
+        // Late move reduction
+        for (0..64) |d| {
+            for (0..64) |i| {
+                lmr[d][i] = @intFromFloat(@log(@as(f64, @floatFromInt(d))) * @log(@as(f64, @floatFromInt(i))) / 2.0);
+            }
         }
     }
 }

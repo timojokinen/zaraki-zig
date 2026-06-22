@@ -9,6 +9,7 @@ const MoveList = @import("move.zig").MoveList;
 const MoveFlags = @import("move.zig").MoveFlags;
 const TranspositionTable = @import("tt.zig").TranspositionTable;
 const TTEntry = @import("tt.zig").TTEntry;
+const Color = @import("utils.zig").Color;
 
 const DEFAULT_TT_SIZE_MB = 16;
 
@@ -25,6 +26,32 @@ const SupportedCommands = enum {
 };
 
 const PositionArguments = enum { startpos, fen };
+const GoArguments = enum {
+    depth,
+    perft,
+    infinite,
+    movetime,
+    wtime,
+    btime,
+    winc,
+    binc,
+};
+
+const SearchLimits = struct {
+    depth: ?usize = null,
+    movetime_ms: ?u64 = null,
+    wtime_ms: ?u64 = null,
+    btime_ms: ?u64 = null,
+    winc_ms: ?u64 = null,
+    binc_ms: ?u64 = null,
+    infinite: bool = false,
+    perft: ?usize = null,
+};
+
+fn parseNextInt(parts: anytype, comptime T: type) ?T {
+    const tok = parts.next() orelse return null;
+    return std.fmt.parseInt(T, tok, 10) catch null;
+}
 
 fn moveToUci(move: Move, buf: *[5]u8) []u8 {
     const from = utils.idx2san(move.from_sq);
@@ -78,6 +105,20 @@ fn mb_to_tt_size(mb: usize) usize {
     return @as(u64, 1) << @as(u6, @intCast(63 - @clz(requested_size_in_bit)));
 }
 
+fn computeBudget(limits: SearchLimits, side: Color) ?u64 {
+    if (limits.movetime_ms) |t| return t;
+    if (limits.infinite) return null; // no time limit
+
+    const time_left = if (side == .White) limits.wtime_ms else limits.btime_ms;
+    const inc = if (side == .White) limits.winc_ms else limits.binc_ms;
+
+    if (time_left) |t| {
+        const base = t / 30;
+        return base + (inc orelse 0);
+    }
+    return null;
+}
+
 pub fn uciInterface(io: std.Io, allocator: std.mem.Allocator) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
@@ -121,11 +162,14 @@ pub fn uciInterface(io: std.Io, allocator: std.mem.Allocator) !void {
                 try stdout.flush();
             },
             .ucinewgame => {
+                searcher.resetPerGame();
                 position = try createPositionFromFEN(startpos_fen);
             },
             .setoption => {},
             .ponderhit => {},
-            .stop => {},
+            .stop => {
+                searcher.should_stop = true; // TODO: DOES NOT WORK YET, NEED SEARCHER ON WORKER THREAD
+            },
             .position => {
                 const raw_arg1 = cmd_parts.next() orelse continue;
                 const arg1 = std.meta.stringToEnum(PositionArguments, raw_arg1) orelse continue;
@@ -157,27 +201,27 @@ pub fn uciInterface(io: std.Io, allocator: std.mem.Allocator) !void {
                 }
             },
             .go => {
-                var perft_depth: ?usize = null;
-                var depth: usize = 5;
+                var limits: SearchLimits = .{};
 
                 while (cmd_parts.next()) |arg| {
-                    if (std.mem.eql(u8, arg, "depth")) {
-                        if (cmd_parts.next()) |d| {
-                            depth = std.fmt.parseInt(usize, d, 10) catch 6;
-                        }
-                    } else if (std.mem.eql(u8, arg, "perft")) {
-                        if (cmd_parts.next()) |d| {
-                            perft_depth = std.fmt.parseInt(usize, d, 10) catch null;
-                        }
+                    const go_arg = std.meta.stringToEnum(GoArguments, arg) orelse continue;
+                    switch (go_arg) {
+                        .depth => limits.depth = parseNextInt(&cmd_parts, usize),
+                        .movetime => limits.movetime_ms = parseNextInt(&cmd_parts, u64),
+                        .wtime => limits.wtime_ms = parseNextInt(&cmd_parts, u64),
+                        .btime => limits.btime_ms = parseNextInt(&cmd_parts, u64),
+                        .winc => limits.winc_ms = parseNextInt(&cmd_parts, u64),
+                        .binc => limits.binc_ms = parseNextInt(&cmd_parts, u64),
+                        .infinite => limits.infinite = true,
+                        .perft => limits.perft = parseNextInt(&cmd_parts, usize),
                     }
-                    // movetime, wtime, btime, winc, binc, infinite: use default depth
                 }
 
-                if (perft_depth) |pd| {
+                if (limits.perft) |pd| {
                     _ = try perft(&position, pd);
                 } else {
-                    tt.clear();
-                    const best_move = try searcher.think(&position, depth);
+                    const movetime_budget_ms = computeBudget(limits, position.board_state.side_to_move);
+                    const best_move = try searcher.think(&position, limits.depth orelse 99, movetime_budget_ms);
                     var move_buf: [5]u8 = undefined;
                     const move_str = moveToUci(best_move, &move_buf);
                     var out_buf: [20]u8 = undefined;
