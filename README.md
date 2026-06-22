@@ -1,5 +1,7 @@
 # Zaraki
 
+![Zaraki README Header](header.png)
+
 Bitboard chess engine in Zig.
 
 The code is currently a small single-threaded UCI engine with legal move generation, a standard alpha-beta search stack, incremental make/unmake, and a basic tapered PST evaluation. Most implementation choices are recognizable from conventional CPW-style engines.
