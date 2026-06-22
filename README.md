@@ -28,7 +28,7 @@ The code is currently a small single-threaded UCI engine with legal move generat
 - Iterative deepening
 - Aspiration windows
 - Principal variation tracking
-- Quiescence search
+- Quiescence search with standpat, SEE Pruning
 - Transposition table
 - TT exact / lower-bound / upper-bound node types, always replace
 - Hash move ordering
@@ -129,7 +129,7 @@ Run the installed binary:
 On startup the engine prints:
 
 ```text
-Vanta 0.1 by Timo Jokinen
+Zaraki 0.1 by Timo Jokinen
 ```
 
 ## Tests
