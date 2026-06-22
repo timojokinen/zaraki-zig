@@ -13,9 +13,15 @@ const NodeType = @import("tt.zig").NodeType;
 const tables = @import("tables.zig");
 
 const INF: i32 = 32_000;
-const MAX_PLY: usize = 128;
+const MAX_SEARCH_PLY: usize = 128;
+const MAX_GAME_PLY: usize = 1024;
+const MAX_HASH_HISTORY: usize = MAX_SEARCH_PLY + MAX_GAME_PLY;
 const MATE: i32 = 30_000;
-const MATE_THRESHOLD: i32 = MATE - @as(i32, MAX_PLY);
+const MATE_THRESHOLD: i32 = MATE - @as(i32, MAX_SEARCH_PLY);
+
+const REP_TABLE_BITS = 12;
+const REP_TABLE_SIZE = 1 << REP_TABLE_BITS;
+const REP_TABLE_MASK = REP_TABLE_SIZE - 1;
 
 fn scoreToTT(score: i32, ply: usize) i32 {
     if (score > MATE_THRESHOLD) return score + @as(i32, @intCast(ply));
@@ -38,17 +44,17 @@ pub const Searcher = struct {
     stdout: *std.Io.Writer,
     tt_size_mb: usize = 64,
 
-    pv: [MAX_PLY][MAX_PLY]Move = std.mem.zeroes([MAX_PLY][MAX_PLY]Move),
-    pv_length: [MAX_PLY]u8 = [_]u8{0} ** MAX_PLY,
+    pv: [MAX_SEARCH_PLY][MAX_SEARCH_PLY]Move = std.mem.zeroes([MAX_SEARCH_PLY][MAX_SEARCH_PLY]Move),
+    pv_length: [MAX_SEARCH_PLY]u8 = [_]u8{0} ** MAX_SEARCH_PLY,
 
-    saved_pv: [MAX_PLY]Move = undefined,
+    saved_pv: [MAX_SEARCH_PLY]Move = undefined,
     saved_pv_length: usize = 0,
 
-    move_lists: [MAX_PLY]MoveList = std.mem.zeroes([MAX_PLY]MoveList),
+    move_lists: [MAX_SEARCH_PLY]MoveList = std.mem.zeroes([MAX_SEARCH_PLY]MoveList),
     nodes: usize = 0,
 
     history: [2][64][64]i32 = undefined,
-    killers: [MAX_PLY][2]Move = undefined,
+    killers: [MAX_SEARCH_PLY][2]Move = undefined,
 
     should_stop: bool = false,
     move_time_millis: usize = 0,
@@ -57,19 +63,58 @@ pub const Searcher = struct {
     best_move_so_far: ?Move = null,
     depth_completed: usize = 0,
 
+    hash_history: [MAX_HASH_HISTORY]u64 = std.mem.zeroes([MAX_HASH_HISTORY]u64),
+    hash_history_length: usize = 0,
+    repetition_table: [4096]u16 = [_]u16{0} ** REP_TABLE_SIZE,
+
     pub fn resetPerSearch(self: *Searcher) void {
         self.nodes = 0;
         self.should_stop = false;
         self.saved_pv_length = 0;
-        self.pv_length = [_]u8{0} ** MAX_PLY;
-        self.pv = std.mem.zeroes([MAX_PLY][MAX_PLY]Move);
-        self.killers = std.mem.zeroes([MAX_PLY][2]Move);
+        self.pv_length = [_]u8{0} ** MAX_SEARCH_PLY;
+        self.pv = std.mem.zeroes([MAX_SEARCH_PLY][MAX_SEARCH_PLY]Move);
+        self.killers = std.mem.zeroes([MAX_SEARCH_PLY][2]Move);
         self.history = std.mem.zeroes([2][64][64]i32);
+        self.hash_history_length = 0;
+        self.repetition_table = [_]u16{0} ** REP_TABLE_SIZE;
     }
 
     pub fn resetPerGame(self: *Searcher) void {
         self.resetPerSearch();
         self.tt.clear();
+    }
+
+    pub fn pushRepetition(self: *Searcher, hash: u64) void {
+        self.hash_history[self.hash_history_length] = hash;
+        self.repetition_table[@intCast(hash & REP_TABLE_MASK)] += 1;
+        self.hash_history_length += 1;
+    }
+
+    pub fn popRepetition(self: *Searcher) void {
+        self.hash_history_length -= 1;
+        const hash = self.hash_history[self.hash_history_length];
+        self.repetition_table[@intCast(hash & REP_TABLE_MASK)] -= 1;
+    }
+
+    pub fn isDrawByRepetitionOrRule50(self: *Searcher, position: *Position) bool {
+        // 50 move rule check
+        if (position.board_state.halfmove_clock >= 100) return true;
+
+        // 3-fold repetition check
+        const rep_table_idx: usize = @intCast(position.hash & REP_TABLE_MASK);
+        if (self.repetition_table[rep_table_idx] < 3) return false;
+
+        var i = self.hash_history_length;
+        var matches: usize = 0;
+        while (i > 0) {
+            i -= 1;
+            if (self.hash_history[i] == position.hash) {
+                matches += 1;
+            }
+            if (matches >= 3) return true;
+        }
+
+        return false;
     }
 
     pub fn think(self: *Searcher, position: *Position, max_depth: usize, movetime_budget_ms: ?u64) !Move {
@@ -135,6 +180,11 @@ pub const Searcher = struct {
             return error.SearchStopped;
         }
 
+        // Check 3fold repetition
+        if (self.isDrawByRepetitionOrRule50(position)) {
+            return 0;
+        }
+
         // TT-Probe
         const tt_entry = self.tt.get(position.hash);
         const hash_move: ?Move = if (tt_entry.node_type != .NONE) tt_entry.hash_move else null;
@@ -155,7 +205,6 @@ pub const Searcher = struct {
         }
 
         const move_list_ptr = &self.move_lists[ply];
-
         try position.generateMoves(move_list_ptr);
         scoreMoves(position, self, ply, move_list_ptr, hash_move);
 
@@ -190,6 +239,7 @@ pub const Searcher = struct {
         while (i < move_list_ptr.count) : (i += 1) {
             const sm = move_list_ptr.pickNext(i);
             try position.makeMove(sm.move);
+            self.pushRepetition(position.hash);
 
             const child_is_pv = i == 0 and is_pv;
 
@@ -216,6 +266,7 @@ pub const Searcher = struct {
                 }
             }
 
+            self.popRepetition();
             try position.unmakeMove(sm.move);
 
             if (score >= beta) {
@@ -274,6 +325,11 @@ pub const Searcher = struct {
             return error.SearchStopped;
         }
 
+        // Check 3fold repetition
+        if (self.isDrawByRepetitionOrRule50(position)) {
+            return 0;
+        }
+
         // TT probe
         const tt_entry = self.tt.get(position.hash);
         const hash_move: ?Move = if (tt_entry.hash == position.hash and tt_entry.node_type != .NONE) tt_entry.hash_move else null;
@@ -302,7 +358,9 @@ pub const Searcher = struct {
             const sm = move_list_ptr.pickNext(i);
             if (sm.score < 1_000_000) break;
             try position.makeMove(sm.move);
+            self.pushRepetition(position.hash);
             const score = -(try quiescenceSearch(self, position, -beta, -alpha, ply + 1));
+            self.popRepetition();
             try position.unmakeMove(sm.move);
             if (score >= beta) return score;
             if (score > max) max = score;
