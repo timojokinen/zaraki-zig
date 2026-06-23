@@ -164,14 +164,6 @@ const eg_pst: [6][64]i32 = blk: {
 };
 const phase_inc: [6]i32 = .{ 0, 1, 1, 2, 4, 0 };
 
-/// fn materialScore(pos: *const Position, offset: usize) i32 {
-///     const pawns: u16 = @popCount(pos.bbs[@intFromEnum(PieceType.Pawn) + offset]);
-///     const knights: u16 = @popCount(pos.bbs[@intFromEnum(PieceType.Knight) + offset]);
-///     const bishops: u16 = @popCount(pos.bbs[@intFromEnum(PieceType.Bishop) + offset]);
-///     const rooks: u16 = @popCount(pos.bbs[@intFromEnum(PieceType.Rook) + offset]);
-///     const queens: u16 = @popCount(pos.bbs[@intFromEnum(PieceType.Queen) + offset]);
-///     return @as(i32, (pawns * 100) + (knights * 320) + (bishops * 330) + (rooks * 500) + (queens * 900));
-/// }
 fn positionalScore(pos: *const Position) i32 {
     var mg = [_]i32{ 0, 0 };
     var eg = [_]i32{ 0, 0 };

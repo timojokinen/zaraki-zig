@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const utils = @import("utils.zig");
 const Searcher = @import("search.zig").Searcher;
 const Position = @import("position.zig").Position;
@@ -152,7 +153,7 @@ pub fn uciInterface(io: std.Io, allocator: std.mem.Allocator) !void {
         switch (cmd) {
             .quit => break,
             .uci => {
-                try stdout.writeAll("id name Zaraki\n");
+                try stdout.print("id name Zaraki {s}\n", .{build_options.engine_version});
                 try stdout.writeAll("id author Timo Jokinen\n");
                 try stdout.writeAll("uciok\n");
                 try stdout.flush();
@@ -218,7 +219,7 @@ pub fn uciInterface(io: std.Io, allocator: std.mem.Allocator) !void {
                 }
 
                 if (limits.perft) |pd| {
-                    _ = try perft(&position, pd);
+                    _ = try perft(io, &position, pd);
                 } else {
                     const movetime_budget_ms = computeBudget(limits, position.board_state.side_to_move);
                     const best_move = try searcher.think(&position, limits.depth orelse 99, movetime_budget_ms);

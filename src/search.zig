@@ -6,6 +6,7 @@ const MoveFlags = @import("move.zig").MoveFlags;
 const ScoredMove = @import("move.zig").ScoredMove;
 const eval = @import("eval.zig").eval;
 const Color = @import("utils.zig").Color;
+const utils = @import("utils.zig");
 const PieceType = @import("piece.zig").PieceType;
 const scoreMoves = @import("movepick.zig").scoreMoves;
 const TranspositionTable = @import("tt.zig").TranspositionTable;
@@ -346,6 +347,18 @@ pub const Searcher = struct {
 
         const static_eval = eval(position);
         if (static_eval >= beta) return static_eval;
+
+        var delta: i32 = 1_000;
+
+        const pawns_tobe_queen = position.bbs[@intFromEnum(PieceType.Pawn) + @as(usize, if (position.board_state.side_to_move == .Black) 6 else 0)] & utils.relativeRank(6, position.board_state.side_to_move);
+        if (pawns_tobe_queen != 0) {
+            delta += 775;
+        }
+
+        if (static_eval < alpha_ - delta) {
+            return alpha_;
+        }
+
         var alpha: i32 = if (static_eval > alpha_) static_eval else alpha_;
 
         const move_list_ptr = &self.move_lists[ply];
