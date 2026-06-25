@@ -12,6 +12,7 @@ const scoreMoves = @import("movepick.zig").scoreMoves;
 const TranspositionTable = @import("tt.zig").TranspositionTable;
 const NodeType = @import("tt.zig").NodeType;
 const tables = @import("tables.zig");
+const movepick = @import("movepick.zig");
 
 const INF: i32 = 32_000;
 const MAX_SEARCH_PLY: usize = 128;
@@ -37,6 +38,17 @@ fn scoreFromTT(score: i32, ply: usize) i32 {
 }
 
 const SearcherError = error{SearchStopped};
+
+pub const SearchLimits = struct {
+    depth: ?usize = null,
+    movetime_ms: ?u64 = null,
+    wtime_ms: ?u64 = null,
+    btime_ms: ?u64 = null,
+    winc_ms: ?u64 = null,
+    binc_ms: ?u64 = null,
+    infinite: bool = false,
+    perft: ?usize = null,
+};
 
 pub const Searcher = struct {
     tt: *TranspositionTable,
@@ -76,13 +88,17 @@ pub const Searcher = struct {
         self.pv = std.mem.zeroes([MAX_SEARCH_PLY][MAX_SEARCH_PLY]Move);
         self.killers = std.mem.zeroes([MAX_SEARCH_PLY][2]Move);
         self.history = std.mem.zeroes([2][64][64]i32);
-        self.hash_history_length = 0;
-        self.repetition_table = [_]u16{0} ** REP_TABLE_SIZE;
     }
 
     pub fn resetPerGame(self: *Searcher) void {
         self.resetPerSearch();
         self.tt.clear();
+        self.resetPerNewPosition();
+    }
+
+    pub fn resetPerNewPosition(self: *Searcher) void {
+        self.hash_history_length = 0;
+        self.repetition_table = [_]u16{0} ** REP_TABLE_SIZE;
     }
 
     pub fn pushRepetition(self: *Searcher, hash: u64) void {
@@ -118,15 +134,17 @@ pub const Searcher = struct {
         return false;
     }
 
-    pub fn think(self: *Searcher, position: *Position, max_depth: usize, movetime_budget_ms: ?u64) !Move {
+    pub fn think(self: *Searcher, position: *Position, search_limits: SearchLimits) !Move {
+        const depth = search_limits.depth orelse 99;
+        const movetime_budget_ms = self.computeBudget(search_limits, position.board_state.side_to_move);
         self.move_time_millis = movetime_budget_ms orelse 0;
-        if (max_depth == 0) return error.InvalidDepth;
+        if (depth == 0) return error.InvalidDepth;
         self.resetPerSearch();
 
         self.timer = std.Io.Clock.now(.awake, self.io);
         var d: usize = 1;
         var prev_score: i32 = 0;
-        outer: while (d <= max_depth) : (d += 1) {
+        outer: while (d <= depth) : (d += 1) {
             var delta: i32 = 25;
             var alpha = if (d >= 4) prev_score - delta else -INF;
             var beta = if (d >= 4) prev_score + delta else INF;
@@ -367,9 +385,33 @@ pub const Searcher = struct {
 
         var max = static_eval;
         var i: usize = 0;
-        while (i < move_list_ptr.count) : (i += 1) {
+        loop: while (i < move_list_ptr.count) : (i += 1) {
             const sm = move_list_ptr.pickNext(i);
+
+            // SEE Pruning
             if (sm.score < 1_000_000) break;
+
+            // Delta Pruning
+            if (@intFromEnum(sm.move.flags) & @intFromEnum(MoveFlags.CAPTURE) != 0) {
+                const per_move_delta: i32 = 200;
+                const captured_piece_sq = blk: {
+                    if (sm.move.flags != .EP_CAPTURE) break :blk sm.move.to_sq;
+                    if (position.board_state.side_to_move == .White) break :blk sm.move.to_sq - 8;
+                    break :blk sm.move.to_sq + 8;
+                };
+                const captured_piece = position.pieceAt(captured_piece_sq);
+
+                const piece_value = movepick.PIECE_VALUES[@intFromEnum(captured_piece.?)];
+                const prom_gain = switch (sm.move.flags) {
+                    .KNIGHT_PROMOTION_CAPTURE => movepick.PIECE_VALUES[@intFromEnum(PieceType.Knight)] - movepick.PIECE_VALUES[@intFromEnum(PieceType.Pawn)],
+                    .BISHOP_PROMOTION_CAPTURE => movepick.PIECE_VALUES[@intFromEnum(PieceType.Bishop)] - movepick.PIECE_VALUES[@intFromEnum(PieceType.Pawn)],
+                    .ROOK_PROMOTION_CAPTURE => movepick.PIECE_VALUES[@intFromEnum(PieceType.Rook)] - movepick.PIECE_VALUES[@intFromEnum(PieceType.Pawn)],
+                    .QUEEN_PROMOTION_CAPTURE => movepick.PIECE_VALUES[@intFromEnum(PieceType.Queen)] - movepick.PIECE_VALUES[@intFromEnum(PieceType.Pawn)],
+                    else => 0,
+                };
+                if (static_eval + piece_value + prom_gain + per_move_delta < alpha) continue :loop;
+            }
+
             try position.makeMove(sm.move);
             self.pushRepetition(position.hash);
             const score = -(try quiescenceSearch(self, position, -beta, -alpha, ply + 1));
@@ -390,5 +432,19 @@ pub const Searcher = struct {
             break :blk elapsed_ms >= self.move_time_millis;
         };
         return self.should_stop or time_stop;
+    }
+
+    fn computeBudget(_: *Searcher, limits: SearchLimits, side: utils.Color) ?u64 {
+        if (limits.infinite) return null; // no time limit
+        if (limits.movetime_ms) |t| return t;
+
+        const time_left = if (side == .White) limits.wtime_ms else limits.btime_ms;
+        const inc = if (side == .White) limits.winc_ms else limits.binc_ms;
+
+        if (time_left) |t| {
+            const base = t / 30;
+            return base + (inc orelse 0);
+        }
+        return null;
     }
 };

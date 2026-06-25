@@ -157,3 +157,8 @@ pub fn pext(src: u64, mask: u64) u64 {
           [mask] "r" (mask),
     );
 }
+
+pub fn parseNextInt(parts: anytype, comptime T: type) ?T {
+    const tok = parts.next() orelse return null;
+    return std.fmt.parseInt(T, tok, 10) catch null;
+}

@@ -100,7 +100,7 @@ pub fn squareAttackers(bbs: *const [12]u64, occ: u64, to_sq: u6) u64 {
     return bb;
 }
 
-const PIECE_VALUES: [6]i32 = .{ 100, 320, 330, 510, 1_000, 20_000 };
+pub const PIECE_VALUES: [6]i32 = .{ 100, 320, 330, 510, 1_000, 20_000 };
 
 pub fn leastValuableAttacker(bbs: *const [12]u64, attdef: u64, color: Color) ?struct { PieceType, u6 } {
     for (0..6) |piece_idx| {

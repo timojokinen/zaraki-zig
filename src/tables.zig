@@ -137,7 +137,11 @@ pub fn initTables() void {
 
         // Late move reduction
         for (0..64) |d| {
-            for (0..64) |i| {
+            inner: for (0..64) |i| {
+                if (i == 0 or d == 0) {
+                    lmr[d][i] = 0;
+                    continue :inner;
+                }
                 lmr[d][i] = @intFromFloat(0.99 + @log(@as(f64, @floatFromInt(d))) * @log(@as(f64, @floatFromInt(i))) / 3.14);
             }
         }

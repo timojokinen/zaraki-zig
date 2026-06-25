@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const initTables = @import("tables.zig").initTables;
 const initZobristKeys = @import("zobrist.zig").initZobristKeys;
+const uci = @import("uci.zig");
 const uciInterface = @import("uci.zig").uciInterface;
 
 pub fn main(init: std.process.Init) !void {
@@ -14,5 +15,6 @@ pub fn main(init: std.process.Init) !void {
 
     initZobristKeys();
     initTables();
-    try uciInterface(init.io, init.gpa);
+    var uci_interface = uci.UCIInterface.init(init.io, init.gpa);
+    try uci_interface.listen();
 }

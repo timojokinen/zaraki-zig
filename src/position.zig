@@ -18,27 +18,6 @@ const CastlingRights = @import("fen.zig").CastlingRights;
 const zobrist = @import("zobrist.zig");
 const enumerateBitboard = utils.enumerateBitboard;
 
-pub fn boardStateToPieceBitboards(board_state: BoardState) [12]Bitboard {
-    var bbs: [12]Bitboard = .{0} ** 12;
-    for (0..8) |rank| {
-        for (0..8) |file| {
-            const square_occupancy = board_state.mat_8x8[rank][file];
-            if (square_occupancy == 0) continue;
-            const piece: Piece = @bitCast(square_occupancy);
-            const bb_idx = @intFromEnum(piece.type()) + (@as(u4, (if (piece.white) 0 else 6)));
-            bbs[bb_idx] |= @as(u64, 1) << @intCast(rank * 8 + file);
-        }
-    }
-    return bbs;
-}
-
-pub fn createPositionFromFEN(fen: []const u8) !Position {
-    const board_state = try parseFen(fen);
-    const bbs = boardStateToPieceBitboards(board_state);
-    const pos = Position{ .board_state = board_state, .bbs = bbs };
-    return pos;
-}
-
 pub const UndoInfo = struct { captured_piece: ?PieceType, castling_rights: CastlingRights, en_passant_square: ?u6, half_move_clock: u32, hash: u64 };
 
 pub const Position = struct {
@@ -48,29 +27,19 @@ pub const Position = struct {
     undo_index: u8 = 0,
     hash: u64 = undefined,
 
-    pub fn applyFEN(fen: []const u8) !void {
-        const board_state = try parseFen(fen);
+    pub fn createFromFen(fen: []const u8) !Position {
+        const bbs, const hash, const board_state = try parseFen(fen);
+        const pos = Position{ .board_state = board_state, .bbs = bbs, .hash = hash };
+        return pos;
+    }
 
-        var bbs: [12]Bitboard = .{0} ** 12;
-        var hash: u64 = 0;
-
-        if (board_state.side_to_move == .Black) hash ^= zobrist.black_key;
-        for (0..8) |rank| {
-            inner: for (0..8) |file| {
-                if (board_state.mat_8x8[rank][file] == 0) continue :inner;
-                const square: u6 = @intCast(rank * 8 + file);
-                const piece: Piece = @bitCast(board_state.mat_8x8[rank][file]);
-                const bb_idx = @intFromEnum(piece.type()) + (@as(u4, (if (piece.white) 0 else 6)));
-                bbs[bb_idx] |= @as(u64, 1) << @intCast(square);
-                hash ^= zobrist.piece_keys[bb_idx][square];
-            }
-        }
-
-        hash ^= zobrist.castling_rights_keys[@intCast(board_state.castling_rights)];
-
-        if (board_state.en_passant_square) |ep_sq| {
-            hash ^= zobrist.ep_keys[ep_sq & 7];
-        }
+    pub fn applyFen(self: *Position, fen: []const u8) !void {
+        const bbs, const hash, const board_state = try parseFen(fen);
+        self.undo_stack = undefined;
+        self.undo_index = 0;
+        self.hash = hash;
+        self.bbs = bbs;
+        self.board_state = board_state;
     }
 
     pub fn makeMove(self: *Position, move: Move) !void {

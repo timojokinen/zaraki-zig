@@ -6,6 +6,7 @@ const san2idx = @import("utils.zig").san2idx;
 const printBoard = @import("utils.zig").printBoard;
 const Piece = @import("piece.zig").Piece;
 const makePiece = @import("piece.zig").makePiece;
+const zobrist = @import("zobrist.zig");
 
 const FENParsingError = error{
     InvalidPartCount,
@@ -19,7 +20,6 @@ pub const CastlingRights = packed struct(u4) {
 };
 
 pub const BoardState = struct {
-    mat_8x8: [8][8]u8,
     side_to_move: Color,
     castling_rights: CastlingRights,
     en_passant_square: ?u6,
@@ -27,7 +27,7 @@ pub const BoardState = struct {
     fullmove_number: u32,
 };
 
-pub fn parseFen(fen: []const u8) !BoardState {
+pub fn parseFen(fen: []const u8) !struct { [12]u64, u64, BoardState } {
     var iterator = std.mem.splitAny(u8, fen, " ");
     var mat_8x8: [8][8]u8 = .{.{0} ** 8} ** 8;
 
@@ -97,12 +97,28 @@ pub fn parseFen(fen: []const u8) !BoardState {
     const fullmove_number_str = iterator.next() orelse return FENParsingError.InvalidPartCount;
     const fullmove_number = try std.fmt.parseInt(u32, fullmove_number_str, 10);
 
-    return .{
-        .mat_8x8 = mat_8x8,
-        .side_to_move = side_to_move,
-        .castling_rights = castling_rights,
-        .en_passant_square = en_passant_sqidx,
-        .halfmove_clock = halfmove_clock,
-        .fullmove_number = fullmove_number,
-    };
+    const board_state: BoardState = .{ .castling_rights = castling_rights, .halfmove_clock = halfmove_clock, .fullmove_number = fullmove_number, .en_passant_square = en_passant_sqidx, .side_to_move = side_to_move };
+
+    var bbs: [12]u64 = .{0} ** 12;
+    var hash: u64 = 0;
+
+    if (board_state.side_to_move == .Black) hash ^= zobrist.black_key;
+    for (0..8) |rank| {
+        inner: for (0..8) |file| {
+            if (mat_8x8[rank][file] == 0) continue :inner;
+            const square: u6 = @intCast(rank * 8 + file);
+            const piece: Piece = @bitCast(mat_8x8[rank][file]);
+            const bb_idx = @intFromEnum(piece.type()) + (@as(u4, (if (piece.white) 0 else 6)));
+            bbs[bb_idx] |= @as(u64, 1) << @intCast(square);
+            hash ^= zobrist.piece_keys[bb_idx][square];
+        }
+    }
+
+    hash ^= zobrist.castling_rights_keys[@as(u4, @bitCast(board_state.castling_rights))];
+
+    if (board_state.en_passant_square) |ep_sq| {
+        hash ^= zobrist.ep_keys[ep_sq & 7];
+    }
+
+    return .{ bbs, hash, board_state };
 }
