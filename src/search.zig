@@ -1,18 +1,13 @@
 const std = @import("std");
-const Position = @import("position.zig").Position;
-const Move = @import("move.zig").Move;
-const MoveList = @import("move.zig").MoveList;
-const MoveFlags = @import("move.zig").MoveFlags;
-const ScoredMove = @import("move.zig").ScoredMove;
+const mv = @import("move.zig");
 const eval = @import("eval.zig").eval;
-const Color = @import("utils.zig").Color;
 const utils = @import("utils.zig");
-const PieceType = @import("piece.zig").PieceType;
-const scoreMoves = @import("movepick.zig").scoreMoves;
-const TranspositionTable = @import("tt.zig").TranspositionTable;
-const NodeType = @import("tt.zig").NodeType;
+const tt = @import("tt.zig");
 const tables = @import("tables.zig");
 const movepick = @import("movepick.zig");
+
+const PieceType = @import("piece.zig").PieceType;
+const Position = @import("position.zig").Position;
 
 const INF: i32 = 32_000;
 const MAX_SEARCH_PLY: usize = 128;
@@ -51,29 +46,29 @@ pub const SearchLimits = struct {
 };
 
 pub const Searcher = struct {
-    tt: *TranspositionTable,
+    tt: *tt.TranspositionTable,
     allocator: std.mem.Allocator,
     io: std.Io,
     stdout: *std.Io.Writer,
     tt_size_mb: usize = 64,
 
-    pv: [MAX_SEARCH_PLY][MAX_SEARCH_PLY]Move = std.mem.zeroes([MAX_SEARCH_PLY][MAX_SEARCH_PLY]Move),
+    pv: [MAX_SEARCH_PLY][MAX_SEARCH_PLY]mv.Move = std.mem.zeroes([MAX_SEARCH_PLY][MAX_SEARCH_PLY]mv.Move),
     pv_length: [MAX_SEARCH_PLY]u8 = [_]u8{0} ** MAX_SEARCH_PLY,
 
-    saved_pv: [MAX_SEARCH_PLY]Move = undefined,
+    saved_pv: [MAX_SEARCH_PLY]mv.Move = undefined,
     saved_pv_length: usize = 0,
 
-    move_lists: [MAX_SEARCH_PLY]MoveList = std.mem.zeroes([MAX_SEARCH_PLY]MoveList),
+    move_lists: [MAX_SEARCH_PLY]mv.MoveList = std.mem.zeroes([MAX_SEARCH_PLY]mv.MoveList),
     nodes: usize = 0,
 
     history: [2][64][64]i32 = undefined,
-    killers: [MAX_SEARCH_PLY][2]Move = undefined,
+    killers: [MAX_SEARCH_PLY][2]mv.Move = undefined,
 
     should_stop: bool = false,
     move_time_millis: usize = 0,
     timer: ?std.Io.Timestamp = null,
 
-    best_move_so_far: ?Move = null,
+    best_move_so_far: ?mv.Move = null,
     depth_completed: usize = 0,
 
     hash_history: [MAX_HASH_HISTORY]u64 = std.mem.zeroes([MAX_HASH_HISTORY]u64),
@@ -85,8 +80,8 @@ pub const Searcher = struct {
         self.should_stop = false;
         self.saved_pv_length = 0;
         self.pv_length = [_]u8{0} ** MAX_SEARCH_PLY;
-        self.pv = std.mem.zeroes([MAX_SEARCH_PLY][MAX_SEARCH_PLY]Move);
-        self.killers = std.mem.zeroes([MAX_SEARCH_PLY][2]Move);
+        self.pv = std.mem.zeroes([MAX_SEARCH_PLY][MAX_SEARCH_PLY]mv.Move);
+        self.killers = std.mem.zeroes([MAX_SEARCH_PLY][2]mv.Move);
         self.history = std.mem.zeroes([2][64][64]i32);
     }
 
@@ -134,7 +129,7 @@ pub const Searcher = struct {
         return false;
     }
 
-    pub fn think(self: *Searcher, position: *Position, search_limits: SearchLimits) !Move {
+    pub fn think(self: *Searcher, position: *Position, search_limits: SearchLimits) !mv.Move {
         const depth = search_limits.depth orelse 99;
         const movetime_budget_ms = self.computeBudget(search_limits, position.board_state.side_to_move);
         self.move_time_millis = movetime_budget_ms orelse 0;
@@ -206,7 +201,7 @@ pub const Searcher = struct {
 
         // TT-Probe
         const tt_entry = self.tt.get(position.hash);
-        const hash_move: ?Move = if (tt_entry.node_type != .NONE) tt_entry.hash_move else null;
+        const hash_move: ?mv.Move = if (tt_entry.node_type != .NONE) tt_entry.hash_move else null;
 
         if (tt_entry.depth >= @as(u8, @intCast(depth)) and !is_root) {
             const adjusted_score = scoreFromTT(tt_entry.score, ply);
@@ -225,7 +220,7 @@ pub const Searcher = struct {
 
         const move_list_ptr = &self.move_lists[ply];
         try position.generateMoves(move_list_ptr);
-        scoreMoves(position, self, ply, move_list_ptr, hash_move);
+        movepick.scoreMoves(position, self, ply, move_list_ptr, hash_move);
 
         if (move_list_ptr.count == 0) {
             if (!position.inCheck()) return 0; // Stalemate
@@ -252,7 +247,7 @@ pub const Searcher = struct {
         // Search Loop
         var max: i32 = -INF;
         var a = alpha;
-        var best_move: ?Move = null;
+        var best_move: ?mv.Move = null;
 
         var i: usize = 0;
         while (i < move_list_ptr.count) : (i += 1) {
@@ -297,7 +292,7 @@ pub const Searcher = struct {
                     .node_type = .LOWERBOUND,
                 });
 
-                if (@intFromEnum(sm.move.flags) & @intFromEnum(MoveFlags.CAPTURE) == 0) {
+                if (@intFromEnum(sm.move.flags) & @intFromEnum(mv.MoveFlags.CAPTURE) == 0) {
                     // Set Killers
                     if (self.killers[ply][0].toU16() != sm.move.toU16()) {
                         self.killers[ply][1] = self.killers[ply][0];
@@ -326,7 +321,7 @@ pub const Searcher = struct {
             }
         }
 
-        const node_type: NodeType = if (max > alpha) .EXACT else .UPPERBOUND;
+        const node_type: tt.NodeType = if (max > alpha) .EXACT else .UPPERBOUND;
         self.tt.set(position.hash, .{
             .score = scoreToTT(max, ply),
             .hash = position.hash,
@@ -351,7 +346,7 @@ pub const Searcher = struct {
 
         // TT probe
         const tt_entry = self.tt.get(position.hash);
-        const hash_move: ?Move = if (tt_entry.hash == position.hash and tt_entry.node_type != .NONE) tt_entry.hash_move else null;
+        const hash_move: ?mv.Move = if (tt_entry.hash == position.hash and tt_entry.node_type != .NONE) tt_entry.hash_move else null;
 
         if (tt_entry.hash == position.hash) {
             const adjusted = scoreFromTT(tt_entry.score, ply);
@@ -381,7 +376,7 @@ pub const Searcher = struct {
 
         const move_list_ptr = &self.move_lists[ply];
         try position.generateCaptureMoves(move_list_ptr);
-        scoreMoves(position, self, ply, move_list_ptr, hash_move);
+        movepick.scoreMoves(position, self, ply, move_list_ptr, hash_move);
 
         var max = static_eval;
         var i: usize = 0;
@@ -392,7 +387,7 @@ pub const Searcher = struct {
             if (sm.score < 1_000_000) break;
 
             // Delta Pruning
-            if (@intFromEnum(sm.move.flags) & @intFromEnum(MoveFlags.CAPTURE) != 0) {
+            if (@intFromEnum(sm.move.flags) & @intFromEnum(mv.MoveFlags.CAPTURE) != 0) {
                 const per_move_delta: i32 = 200;
                 const captured_piece_sq = blk: {
                     if (sm.move.flags != .EP_CAPTURE) break :blk sm.move.to_sq;
