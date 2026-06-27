@@ -91,10 +91,10 @@ pub fn parseFen(fen: []const u8) !struct { [12]u64, u64, BoardState } {
     else
         null;
 
-    const halfmove_clock_str = iterator.next() orelse return FENParsingError.InvalidPartCount;
+    const halfmove_clock_str = iterator.next() orelse "0";
     const halfmove_clock = try std.fmt.parseInt(u32, halfmove_clock_str, 10);
 
-    const fullmove_number_str = iterator.next() orelse return FENParsingError.InvalidPartCount;
+    const fullmove_number_str = iterator.next() orelse "0";
     const fullmove_number = try std.fmt.parseInt(u32, fullmove_number_str, 10);
 
     const board_state: BoardState = .{ .castling_rights = castling_rights, .halfmove_clock = halfmove_clock, .fullmove_number = fullmove_number, .en_passant_square = en_passant_sqidx, .side_to_move = side_to_move };
