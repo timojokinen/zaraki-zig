@@ -19,7 +19,7 @@ var black_pawns_masks: [64]u64 = undefined;
 
 var squares_between: [64][64]u64 = undefined;
 
-var lmr: [64][64]usize = undefined;
+var lmr: [64][256]usize = undefined;
 
 pub fn lookupPawnAttacks(sq: u6, color: utils.Color) utils.Bitboard {
     return switch (color) {
@@ -137,12 +137,13 @@ pub fn initTables() void {
 
         // Late move reduction
         for (0..64) |d| {
-            inner: for (0..64) |i| {
+            inner: for (0..256) |i| {
                 if (i == 0 or d == 0) {
                     lmr[d][i] = 0;
                     continue :inner;
                 }
-                lmr[d][i] = @intFromFloat(0.99 + @log(@as(f64, @floatFromInt(d))) * @log(@as(f64, @floatFromInt(i))) / 3.14);
+                const depth = @max(d, 63);
+                lmr[d][i] = @intFromFloat(0.99 + @log(@as(f64, @floatFromInt(depth))) * @log(@as(f64, @floatFromInt(i))) / 3.14);
             }
         }
     }

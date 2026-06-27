@@ -5,6 +5,7 @@ const utils = @import("utils.zig");
 const tt = @import("tt.zig");
 const tables = @import("tables.zig");
 const movepick = @import("movepick.zig");
+const zobrist = @import("zobrist.zig");
 
 const PieceType = @import("piece.zig").PieceType;
 const Position = @import("position.zig").Position;
@@ -13,23 +14,30 @@ const INF: i32 = 32_000;
 const MAX_SEARCH_PLY: usize = 128;
 const MAX_GAME_PLY: usize = 1024;
 const MAX_HASH_HISTORY: usize = MAX_SEARCH_PLY + MAX_GAME_PLY;
-const MATE: i32 = 30_000;
+const MATE: i32 = 31_000;
 const MATE_THRESHOLD: i32 = MATE - @as(i32, MAX_SEARCH_PLY);
 
 const REP_TABLE_BITS = 12;
 const REP_TABLE_SIZE = 1 << REP_TABLE_BITS;
 const REP_TABLE_MASK = REP_TABLE_SIZE - 1;
 
-fn scoreToTT(score: i32, ply: usize) i32 {
-    if (score > MATE_THRESHOLD) return score + @as(i32, @intCast(ply));
-    if (score < -MATE_THRESHOLD) return score - @as(i32, @intCast(ply));
-    return score;
+pub var tt_enable = true;
+pub var tt_enable_replacement_strategy = true;
+pub var tt_enable_cutoff = true;
+pub var tt_enable_move_ordering = true;
+
+fn scoreToTT(score: i32, ply: usize) i16 {
+    var s: i32 = score;
+    if (score > MATE_THRESHOLD) s = score + @as(i32, @intCast(ply));
+    if (score < -MATE_THRESHOLD) s = score - @as(i32, @intCast(ply));
+
+    return @intCast(std.math.clamp(s, std.math.minInt(i16), std.math.maxInt(i16)));
 }
 
-fn scoreFromTT(score: i32, ply: usize) i32 {
-    if (score > MATE_THRESHOLD) return score - @as(i32, @intCast(ply));
-    if (score < -MATE_THRESHOLD) return score + @as(i32, @intCast(ply));
-    return score;
+fn scoreFromTT(score: i16, ply: usize) i32 {
+    if (score > MATE_THRESHOLD) return score - @as(i16, @intCast(ply));
+    if (score < -MATE_THRESHOLD) return score + @as(i16, @intCast(ply));
+    return @intCast(score);
 }
 
 const SearcherError = error{SearchStopped};
@@ -45,12 +53,22 @@ pub const SearchLimits = struct {
     perft: ?usize = null,
 };
 
+pub const SearchStats = struct {
+    tt_probes: usize = 0,
+    tt_hits: usize = 0, // Hash matches
+    tt_usable: usize = 0, // Hash matches and depth >= current_depth
+    tt_cutoffs_exact: usize = 0,
+    tt_cutoffs_lower: usize = 0,
+    tt_cutoffs_upper: usize = 0,
+    tt_move_used: usize = 0,
+    tt_stores: usize = 0,
+};
+
 pub const Searcher = struct {
     tt: *tt.TranspositionTable,
     allocator: std.mem.Allocator,
     io: std.Io,
-    stdout: *std.Io.Writer,
-    tt_size_mb: usize = 64,
+    stdout: ?*std.Io.Writer = null,
 
     pv: [MAX_SEARCH_PLY][MAX_SEARCH_PLY]mv.Move = std.mem.zeroes([MAX_SEARCH_PLY][MAX_SEARCH_PLY]mv.Move),
     pv_length: [MAX_SEARCH_PLY]u8 = [_]u8{0} ** MAX_SEARCH_PLY,
@@ -75,6 +93,10 @@ pub const Searcher = struct {
     hash_history_length: usize = 0,
     repetition_table: [4096]u16 = [_]u16{0} ** REP_TABLE_SIZE,
 
+    stats: SearchStats = .{},
+
+    gen: u4 = 0,
+
     pub fn resetPerSearch(self: *Searcher) void {
         self.nodes = 0;
         self.should_stop = false;
@@ -83,12 +105,14 @@ pub const Searcher = struct {
         self.pv = std.mem.zeroes([MAX_SEARCH_PLY][MAX_SEARCH_PLY]mv.Move);
         self.killers = std.mem.zeroes([MAX_SEARCH_PLY][2]mv.Move);
         self.history = std.mem.zeroes([2][64][64]i32);
+        self.stats = .{};
     }
 
     pub fn resetPerGame(self: *Searcher) void {
         self.resetPerSearch();
         self.tt.clear();
         self.resetPerNewPosition();
+        self.gen = 0;
     }
 
     pub fn resetPerNewPosition(self: *Searcher) void {
@@ -135,6 +159,7 @@ pub const Searcher = struct {
         self.move_time_millis = movetime_budget_ms orelse 0;
         if (depth == 0) return error.InvalidDepth;
         self.resetPerSearch();
+        self.gen = (self.gen + 1) & 15;
 
         self.timer = std.Io.Clock.now(.awake, self.io);
         var d: usize = 1;
@@ -172,10 +197,16 @@ pub const Searcher = struct {
             else
                 0;
 
-            try self.stdout.print("info depth {} nodes {} time {} nps {}\n", .{
-                d, self.nodes, elapsed_ms, nps,
-            });
-            try self.stdout.flush();
+            if (self.stdout) |out| {
+                try out.print("info depth {} nodes {} time {} nps {}\n", .{
+                    d, self.nodes, elapsed_ms, nps,
+                });
+                try out.print("info score cp {}\n", .{prev_score});
+                try out.print("info tt_probes {} tt_hits {} tt_usable {} tt_cutoffs {} tt_cutoffs_exact {} tt_cutoffs_lower {} tt_cutoffs_upper {} tt_move_used {} tt_stores {} \n", .{ self.stats.tt_probes, self.stats.tt_hits, self.stats.tt_usable, self.stats.tt_cutoffs_exact + self.stats.tt_cutoffs_lower + self.stats.tt_cutoffs_upper, self.stats.tt_cutoffs_exact, self.stats.tt_cutoffs_lower, self.stats.tt_cutoffs_upper, self.stats.tt_move_used, self.stats.tt_stores });
+                try out.writeAll("\n");
+                try out.flush();
+            }
+
             self.depth_completed = d;
         }
 
@@ -200,21 +231,34 @@ pub const Searcher = struct {
         }
 
         // TT-Probe
+        if (tt_enable) self.stats.tt_probes += 1;
         const tt_entry = self.tt.get(position.hash);
-        const hash_move: ?mv.Move = if (tt_entry.node_type != .NONE) tt_entry.hash_move else null;
+        if (tt_entry.node_type != .NONE) self.stats.tt_hits += 1;
 
-        if (tt_entry.depth >= @as(u8, @intCast(depth)) and !is_root) {
+        const hash_move: ?mv.Move = if (tt_entry.node_type != .NONE and tt_entry.node_type != .UPPERBOUND and tt_enable and tt_enable_move_ordering) tt_entry.hash_move else null;
+        if (tt_entry.depth >= @as(u8, @intCast(depth)) and !is_root and tt_enable and tt_enable_cutoff) {
+            self.stats.tt_usable += 1;
             const adjusted_score = scoreFromTT(tt_entry.score, ply);
             if (tt_entry.node_type == .EXACT) {
+                // We know the exact score of this position from a deep enough search.
+                self.stats.tt_cutoffs_exact += 1;
                 return adjusted_score;
             }
 
             if (tt_entry.node_type == .LOWERBOUND) {
-                if (adjusted_score >= beta) return adjusted_score;
+                // The score is at least this high. If it reaches beta, this position is already too good for the opponent to allow.
+                if (adjusted_score >= beta) {
+                    self.stats.tt_cutoffs_lower += 1;
+                    return adjusted_score;
+                }
             }
 
             if (tt_entry.node_type == .UPPERBOUND) {
-                if (adjusted_score <= alpha) return adjusted_score;
+                // The score is at most this high. If it does not reach alpha, this position is already too bad to improve our line.
+                if (adjusted_score <= alpha) {
+                    self.stats.tt_cutoffs_upper += 1;
+                    return adjusted_score;
+                }
             }
         }
 
@@ -252,6 +296,11 @@ pub const Searcher = struct {
         var i: usize = 0;
         while (i < move_list_ptr.count) : (i += 1) {
             const sm = move_list_ptr.pickNext(i);
+
+            if (hash_move) |hm| {
+                if (i == 0 and sm.move.toU16() == hm.toU16()) self.stats.tt_move_used += 1;
+            }
+
             try position.makeMove(sm.move);
             self.pushRepetition(position.hash);
 
@@ -284,13 +333,17 @@ pub const Searcher = struct {
             try position.unmakeMove(sm.move);
 
             if (score >= beta) {
-                self.tt.set(position.hash, .{
-                    .score = scoreToTT(score, ply),
-                    .hash = position.hash,
-                    .hash_move = sm.move,
-                    .depth = @intCast(depth),
-                    .node_type = .LOWERBOUND,
-                });
+                if (tt_enable) {
+                    self.stats.tt_stores += 1;
+                    self.tt.set(position.hash, .{
+                        .score = scoreToTT(score, ply),
+                        .hash = position.hash,
+                        .hash_move = sm.move,
+                        .depth = @intCast(depth),
+                        .node_type = .LOWERBOUND,
+                        .age = self.gen,
+                    });
+                }
 
                 if (@intFromEnum(sm.move.flags) & @intFromEnum(mv.MoveFlags.CAPTURE) == 0) {
                     // Set Killers
@@ -322,13 +375,17 @@ pub const Searcher = struct {
         }
 
         const node_type: tt.NodeType = if (max > alpha) .EXACT else .UPPERBOUND;
-        self.tt.set(position.hash, .{
-            .score = scoreToTT(max, ply),
-            .hash = position.hash,
-            .hash_move = best_move.?,
-            .depth = @intCast(depth),
-            .node_type = node_type,
-        });
+        if (tt_enable) {
+            self.stats.tt_stores += 1;
+            self.tt.set(position.hash, .{
+                .score = scoreToTT(max, ply),
+                .hash = position.hash,
+                .hash_move = best_move.?,
+                .depth = @intCast(depth),
+                .node_type = node_type,
+                .age = self.gen,
+            });
+        }
 
         return max;
     }
@@ -345,15 +402,27 @@ pub const Searcher = struct {
         }
 
         // TT probe
+        if (tt_enable) self.stats.tt_probes += 1;
         const tt_entry = self.tt.get(position.hash);
-        const hash_move: ?mv.Move = if (tt_entry.hash == position.hash and tt_entry.node_type != .NONE) tt_entry.hash_move else null;
+        if (tt_entry.node_type != .NONE) self.stats.tt_hits += 1;
+        const hash_move: ?mv.Move = if (tt_entry.hash == position.hash and tt_entry.node_type != .NONE and tt_enable and tt_enable_move_ordering) tt_entry.hash_move else null;
 
-        if (tt_entry.hash == position.hash) {
+        if (tt_entry.node_type != .NONE and tt_enable and tt_enable_cutoff) {
+            self.stats.tt_usable += 1;
             const adjusted = scoreFromTT(tt_entry.score, ply);
             switch (tt_entry.node_type) {
-                .EXACT => return adjusted,
-                .LOWERBOUND => if (adjusted >= beta) return adjusted,
-                .UPPERBOUND => if (adjusted <= alpha_) return adjusted,
+                .EXACT => {
+                    self.stats.tt_cutoffs_exact += 1;
+                    return adjusted;
+                },
+                .LOWERBOUND => if (adjusted >= beta) {
+                    self.stats.tt_cutoffs_lower += 1;
+                    return adjusted;
+                },
+                .UPPERBOUND => if (adjusted <= alpha_) {
+                    self.stats.tt_cutoffs_upper += 1;
+                    return adjusted;
+                },
                 .NONE => {},
             }
         }
@@ -368,7 +437,7 @@ pub const Searcher = struct {
             delta += 775;
         }
 
-        if (static_eval < alpha_ - delta) {
+        if (static_eval < (alpha_ - delta)) {
             return alpha_;
         }
 
@@ -383,6 +452,9 @@ pub const Searcher = struct {
         loop: while (i < move_list_ptr.count) : (i += 1) {
             const sm = move_list_ptr.pickNext(i);
 
+            if (hash_move) |hm| {
+                if (i == 0 and sm.move.toU16() == hm.toU16()) self.stats.tt_move_used += 1;
+            }
             // SEE Pruning
             if (sm.score < 1_000_000) break;
 
@@ -443,3 +515,110 @@ pub const Searcher = struct {
         return null;
     }
 };
+
+test "TranspositionTable Node Count" {
+    tables.initTables();
+    zobrist.initZobristKeys();
+
+    const positions: [7][]const u8 = .{
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -",
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+        "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1",
+        "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+        "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+    };
+
+    const tt_size: usize = 1 << 16;
+
+    var node_count_no_tt: usize = 0;
+    var node_count_full_tt: usize = 0;
+    var node_count_cutoff_only: usize = 0;
+    var node_count_move_ordering_only: usize = 0;
+
+    for (0..positions.len) |pos_idx| {
+        const search_limits: SearchLimits = .{ .depth = 10 };
+        {
+            tt_enable = false;
+            tt_enable_cutoff = false;
+            tt_enable_move_ordering = false;
+
+            var tt1 = try tt.TranspositionTable.init(std.testing.allocator, tt_size);
+            defer tt1.deinit();
+            var searcher: Searcher = .{ .io = std.testing.io, .allocator = std.testing.allocator, .tt = &tt1 };
+            var pos = try Position.createFromFen(positions[pos_idx]);
+
+            _ = try searcher.think(&pos, search_limits);
+            std.debug.print("Nodes no tt {}\n", .{searcher.nodes});
+            node_count_no_tt += searcher.nodes;
+            tt1.clear();
+        }
+
+        {
+            tt_enable = true;
+            tt_enable_cutoff = false;
+            tt_enable_move_ordering = true;
+
+            var tt2 = try tt.TranspositionTable.init(std.testing.allocator, tt_size);
+            defer tt2.deinit();
+            var searcher: Searcher = .{ .io = std.testing.io, .allocator = std.testing.allocator, .tt = &tt2 };
+            var pos = try Position.createFromFen(positions[pos_idx]);
+
+            _ = try searcher.think(&pos, search_limits);
+            std.debug.print("Nodes move ordering {}\n", .{searcher.nodes});
+            node_count_move_ordering_only += searcher.nodes;
+            tt2.clear();
+        }
+
+        {
+            tt_enable = true;
+            tt_enable_cutoff = true;
+            tt_enable_move_ordering = false;
+
+            var tt3 = try tt.TranspositionTable.init(std.testing.allocator, tt_size);
+            defer tt3.deinit();
+            var searcher: Searcher = .{ .io = std.testing.io, .allocator = std.testing.allocator, .tt = &tt3 };
+            var pos = try Position.createFromFen(positions[pos_idx]);
+
+            _ = try searcher.think(&pos, search_limits);
+            std.debug.print("Nodes cutoff {}\n", .{searcher.nodes});
+            node_count_cutoff_only += searcher.nodes;
+            tt3.clear();
+        }
+
+        {
+            tt_enable = true;
+            tt_enable_cutoff = true;
+            tt_enable_move_ordering = true;
+
+            var tt4 = try tt.TranspositionTable.init(std.testing.allocator, tt_size);
+            defer tt4.deinit();
+            var searcher: Searcher = .{ .io = std.testing.io, .allocator = std.testing.allocator, .tt = &tt4 };
+            var pos = try Position.createFromFen(positions[pos_idx]);
+
+            _ = try searcher.think(&pos, search_limits);
+            std.debug.print("Nodes full {}\n", .{searcher.nodes});
+            node_count_full_tt += searcher.nodes;
+            tt4.clear();
+            std.debug.print("\n", .{});
+        }
+    }
+
+    std.debug.print(
+        \\no tt:       {}
+        \\full tt:     {}
+        \\cutoff only: {}
+        \\move only:   {}
+        \\
+    , .{
+        node_count_no_tt,
+        node_count_full_tt,
+        node_count_cutoff_only,
+        node_count_move_ordering_only,
+    });
+
+    try std.testing.expect(node_count_no_tt > node_count_full_tt);
+    try std.testing.expect(node_count_move_ordering_only > node_count_full_tt);
+    try std.testing.expect(node_count_cutoff_only > node_count_full_tt);
+}

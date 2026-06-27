@@ -1,14 +1,14 @@
 const Position = @import("position.zig").Position;
 const std = @import("std");
+const search = @import("search.zig");
 const PieceType = @import("piece.zig").PieceType;
 const Move = @import("move.zig").Move;
 const MoveFlags = @import("move.zig").MoveFlags;
 const MoveList = @import("move.zig").MoveList;
-const Searcher = @import("search.zig").Searcher;
 const tables = @import("tables.zig");
 const Color = @import("utils.zig").Color;
 
-pub fn scoreMoves(position: *Position, searcher: *Searcher, ply: usize, move_list: *MoveList, hash_move: ?Move) void {
+pub fn scoreMoves(position: *Position, searcher: *search.Searcher, ply: usize, move_list: *MoveList, hash_move: ?Move) void {
     for (move_list.moves[0..move_list.count]) |*scored_move| {
         if (hash_move) |hm| {
             if (hm.toU16() == scored_move.move.toU16()) scored_move.score += 8_000_000;
