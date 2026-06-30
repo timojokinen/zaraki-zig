@@ -56,8 +56,8 @@ pub fn lookupSquaresBetween(sq: u6, sq2: u6) utils.Bitboard {
     return squares_between[sq][sq2];
 }
 
-pub fn lookupLmrReduction(depth: u6, move_idx: u6) usize {
-    return lmr[depth][move_idx];
+pub fn lookupLmrReduction(depth: usize, move_idx: usize) usize {
+    return lmr[@min(depth, lmr.len - 1)][@min(move_idx, lmr[0].len - 1)];
 }
 
 pub fn initTables() void {
@@ -142,7 +142,7 @@ pub fn initTables() void {
                     lmr[d][i] = 0;
                     continue :inner;
                 }
-                const depth = @max(d, 63);
+                const depth = @min(d, 63);
                 lmr[d][i] = @intFromFloat(0.99 + @log(@as(f64, @floatFromInt(depth))) * @log(@as(f64, @floatFromInt(i))) / 3.14);
             }
         }
