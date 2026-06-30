@@ -69,6 +69,12 @@ pub const TimeBudget = struct {
     soft_cap_ms: ?u64,
 };
 
+pub const SearchStack = struct {
+    move: mv.Move,
+    piece_type: PieceType,
+    valid: bool,
+};
+
 pub const Searcher = struct {
     tt: *tt.TranspositionTable,
     allocator: std.mem.Allocator,
@@ -86,6 +92,7 @@ pub const Searcher = struct {
 
     history: [2][64][64]i32 = undefined,
     killers: [MAX_SEARCH_PLY][2]mv.Move = undefined,
+    counters: [2][6][64]mv.Move = std.mem.zeroes([2][6][64]mv.Move),
 
     should_stop: bool = false,
     move_time_millis: ?u64 = null,
@@ -98,6 +105,7 @@ pub const Searcher = struct {
     hash_history: [MAX_HASH_HISTORY]u64 = std.mem.zeroes([MAX_HASH_HISTORY]u64),
     hash_history_length: usize = 0,
     repetition_table: [4096]u16 = [_]u16{0} ** REP_TABLE_SIZE,
+    search_stack: [MAX_GAME_PLY]SearchStack = std.mem.zeroes([MAX_GAME_PLY]SearchStack),
 
     stats: SearchStats = .{},
 
@@ -116,6 +124,8 @@ pub const Searcher = struct {
         self.depth_completed = 0;
         self.seldepth = 0;
         self.move_time_millis = null;
+        self.search_stack = std.mem.zeroes([MAX_GAME_PLY]SearchStack);
+        self.counters = std.mem.zeroes([2][6][64]mv.Move);
     }
 
     pub fn resetPerGame(self: *Searcher) void {
@@ -331,6 +341,7 @@ pub const Searcher = struct {
         if (!is_null and !is_root and !position.inCheck() and non_king_pawns and depth >= 3) {
             var R: usize = 2 + @divTrunc(depth, 6);
             R = @min(R, depth);
+            self.search_stack[ply].valid = false;
             position.makeNullMove();
             errdefer position.unmakeNullMove();
             const score = -(try negamax(self, position, -beta, -(beta - 1), depth - R, ply + 1, false, true, false));
@@ -349,6 +360,9 @@ pub const Searcher = struct {
         var i: usize = 0;
         while (i < move_list_ptr.count) : (i += 1) {
             const sm = move_list_ptr.pickNext(i);
+            const piece_type = position.pieceAt(sm.move.from_sq) orelse return error.InvalidBoardState;
+
+            self.search_stack[ply] = .{ .move = sm.move, .piece_type = piece_type, .valid = true };
 
             if (hash_move) |hm| {
                 if (i == 0 and sm.move.toU16() == hm.toU16()) self.stats.tt_move_used += 1;
@@ -410,7 +424,16 @@ pub const Searcher = struct {
                     // Set History
                     const color = @intFromEnum(position.board_state.side_to_move);
                     self.history[color][sm.move.from_sq][sm.move.to_sq] += @as(i32, @intCast(depth * depth));
+
+                    // Set Counter Move
+                    if (ply > 0) {
+                        const previous = self.search_stack[ply - 1];
+                        if (previous.valid) {
+                            self.counters[@intFromEnum(position.board_state.side_to_move.opp())][@intFromEnum(previous.piece_type)][previous.move.to_sq] = sm.move;
+                        }
+                    }
                 }
+
                 return score;
             }
             if (score > max) {
@@ -519,6 +542,9 @@ pub const Searcher = struct {
         loop: while (i < move_list_ptr.count) : (i += 1) {
             const sm = move_list_ptr.pickNext(i);
 
+            const piece_type = position.pieceAt(sm.move.from_sq) orelse return error.InvalidBoardState;
+            self.search_stack[ply] = .{ .move = sm.move, .piece_type = piece_type, .valid = true };
+
             if (hash_move) |hm| {
                 if (i == 0 and sm.move.toU16() == hm.toU16()) self.stats.tt_move_used += 1;
             }
@@ -553,7 +579,10 @@ pub const Searcher = struct {
             const score = -(try quiescenceSearch(self, position, -beta, -alpha, ply + 1));
             self.popRepetition();
             position.unmakeMove(sm.move);
-            if (score >= beta) return score;
+
+            if (score >= beta) {
+                return score;
+            }
             if (score > max) max = score;
             if (score > alpha) alpha = score;
         }

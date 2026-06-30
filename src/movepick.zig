@@ -59,6 +59,17 @@ pub fn scoreMoves(position: *Position, searcher: *search.Searcher, ply: usize, m
             } else if (searcher.killers[ply][1].toU16() == scored_move.move.toU16()) {
                 scored_move.score += 500_000;
             } else {
+                if (ply > 0) {
+                    const prev = searcher.search_stack[ply - 1];
+                    if (prev.valid) {
+                        const counter_move = searcher.counters[@intFromEnum(position.board_state.side_to_move.opp())][@intFromEnum(prev.piece_type)][prev.move.to_sq];
+
+                        if (counter_move.toU16() == scored_move.move.toU16()) {
+                            scored_move.score += 300_000;
+                        }
+                    }
+                }
+
                 scored_move.score += searcher.history[@intFromEnum(position.board_state.side_to_move)][scored_move.move.from_sq][scored_move.move.to_sq];
             }
         }
