@@ -185,15 +185,15 @@ fn positionalScore(pos: *const Position) struct { i32, i32 } {
         var bb = pos.bbs[pt_idx];
         while (bb != 0) : (bb &= bb - 1) {
             const sq = @ctz(bb);
-            mg[0] += mg_pst[pt_idx][sq];
-            eg[0] += eg_pst[pt_idx][sq];
+            mg[0] += mg_pst[pt_idx][sq ^ 56];
+            eg[0] += eg_pst[pt_idx][sq ^ 56];
         }
 
         var bb_black = pos.bbs[pt_idx + 6];
         while (bb_black != 0) : (bb_black &= bb_black - 1) {
             const sq = @ctz(bb_black);
-            mg[1] += mg_pst[pt_idx][sq ^ 56];
-            eg[1] += eg_pst[pt_idx][sq ^ 56];
+            mg[1] += mg_pst[pt_idx][sq];
+            eg[1] += eg_pst[pt_idx][sq];
         }
     }
 
