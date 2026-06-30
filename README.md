@@ -1,153 +1,143 @@
 # Zaraki
 
-![Zaraki README Header](header.png)
+![Zaraki header](header.png)
 
-Bitboard chess engine in Zig.
+Zaraki is a single-threaded UCI chess engine written in Zig. It uses a
+handcrafted evaluation and a fairly traditional alpha-beta search. The engine
+is playable, but it is still under active development and does not have an
+official rating yet. My current estimation is around 2600.
 
-The code is currently a small single-threaded UCI engine with legal move generation, a standard alpha-beta search stack, incremental make/unmake, and a basic tapered PST evaluation. Most implementation choices are recognizable from conventional CPW-style engines.
+I am a beginner in both chess programming and Zig. Zaraki is a learning project.
 
-## Status
+## Building
 
-- Language: Zig
-- Protocol: UCI
-- Search model: single-threaded negamax
-- Evaluation: tapered material + PST
-
-## Implemented Techniques
-
-### Board Representation
-
-- Bitboards for piece sets
-- Incremental make/unmake
-- Null move make/unmake
-- Incremental Zobrist hashing
-- FEN parsing
-- Compact 16-bit move encoding
-
-### Search
-
-- Negamax alpha-beta
-- Iterative deepening
-- Aspiration windows
-- Principal variation tracking
-- Quiescence search with standpat, SEE Pruning
-- Transposition table
-- TT exact / lower-bound / upper-bound node types, always replace
-- Hash move ordering
-- Null move pruning
-- Late move reductions
-- PVS-style zero-window search on later moves
-- Check extension
-- Mate score normalization for TT storage
-- Basic time-based stop check during node polling
-
-### Move Ordering
-
-- Hash move
-- Queen promotions prioritized
-- Capture ordering with MVV-LVA
-- SEE-based capture discrimination
-- Killer heuristic
-- History heuristic
-- Selection-sort style pick-next move loop
-
-### Evaluation
-
-- PeSTO-style tapered PST evaluation
-- Middlegame / endgame interpolation by phase
-
-### Validation / Utility
-
-- Perft through UCI: `go perft N`
-- UCI position parsing for `startpos` and `fen`
-- PGN files in repo root that appear to be local testing artifacts
-
-## Not Implemented / Current Limits
-
-These are visible from the current code and matter if you plan to extend the engine:
-
-- No multithreading
-- No NNUE
-- No TT replacement policy beyond direct overwrite
-- `setoption` is parsed but not implemented
-- `stop` is acknowledged in UCI, but the code explicitly notes it does not work properly yet because search is not on a worker thread
-- Time management is intentionally simple: roughly `time_left / 30 + increment`
-
-## Repository Layout
-
-- [src/search.zig](/home/archbird/code/vanta-zig/src/search.zig): main search, quiescence, PV, TT usage, pruning/reduction logic
-- [src/movepick.zig](/home/archbird/code/vanta-zig/src/movepick.zig): move scoring, MVV-LVA, SEE, killer/history ordering
-- [src/position.zig](/home/archbird/code/vanta-zig/src/position.zig): bitboards, legal move generation, make/unmake, null move, hash updates
-- [src/attacks.zig](/home/archbird/code/vanta-zig/src/attacks.zig): primitive attack generation, x-ray helpers
-- [src/tables.zig](/home/archbird/code/vanta-zig/src/tables.zig): startup table construction for attack lookups, `squares_between`, LMR table
-- [src/eval.zig](/home/archbird/code/vanta-zig/src/eval.zig): tapered PST evaluation
-- [src/tt.zig](/home/archbird/code/vanta-zig/src/tt.zig): transposition table
-- [src/uci.zig](/home/archbird/code/vanta-zig/src/uci.zig): UCI loop, command parsing, time budgeting
-- [src/perft.zig](/home/archbird/code/vanta-zig/src/perft.zig): divide-style perft output
-- [src/zobrist.zig](/home/archbird/code/vanta-zig/src/zobrist.zig): deterministic Zobrist key init
-
-## Build Requirements
-
-- Zig `0.16.0` works in this repository
-
-If you want the least friction, use a recent Zig 0.16 toolchain.
-
-## Build
-
-Debug build:
-
-```bash
-zig build
-```
-
-Optimized build:
+Zaraki currently builds with Zig 0.16.0.
 
 ```bash
 zig build -Doptimize=ReleaseFast
 ```
 
-The installed executable is written under `zig-out/bin/zaraki_engine`.
-
-## Run
-
-Run directly through the build system:
+The executable is written to `zig-out/bin/zaraki_engine`. A debug build is just:
 
 ```bash
-zig build run
+zig build
 ```
 
-Run optimized:
+Release builds can include a version in the UCI engine name:
 
 ```bash
-zig build -Doptimize=ReleaseFast run
+zig build -Doptimize=ReleaseFast -Dengine_version=v0.1.0
 ```
 
-Run the installed binary:
+## Running it
 
-```bash
-./zig-out/bin/zaraki_engine
-```
+Zaraki does not include a graphical interface. Add the executable as a UCI
+engine in Cute Chess, Arena, Banksia, or another chess GUI.
 
-On startup the engine prints:
+You can also talk to it directly:
 
 ```text
-Zaraki 0.1 by Timo Jokinen
+$ ./zig-out/bin/zaraki_engine
+uci
+isready
+position startpos moves e2e4 e7e5
+go depth 8
 ```
 
-## Tests
+The engine understands `startpos` and FEN positions, fixed-depth searches,
+`movetime`, and the usual clock and increment arguments (`wtime`, `btime`,
+`winc`, and `binc`).
 
-Run the Zig test steps:
+## What's implemented
+
+The board is represented with bitboards and moves are packed into 16 bits.
+Move generation handles checks, pins, castling, promotion, and en passant.
+Positions support incremental make/unmake, null moves, incremental Zobrist
+hashing, threefold repetition, and the fifty-move rule.
+
+The search currently includes:
+
+- Iterative deepening negamax with alpha-beta pruning
+- Principal variation search and aspiration windows
+- Quiescence search with stand pat, SEE pruning, and delta pruning
+- A transposition table with exact, upper, and lower bounds
+- Depth-, age-, and bound-aware transposition-table replacement
+- Null-move pruning, late-move reductions, and check extensions
+- Hash moves, MVV-LVA/SEE captures, killers, history, and countermoves
+- Mate-score normalization and selective-depth reporting
+- Basic clock management with soft and hard time limits
+
+Evaluation is tapered between middlegame and endgame scores. It uses PeSTO
+material and piece-square tables, mobility, a bishop-pair bonus, a simple pawn
+shield term, and a tempo bonus. It is intentionally still small enough to
+understand and change without needing a training pipeline.
+
+## Testing
+
+Run the Zig tests with:
 
 ```bash
 zig build test
 ```
 
-At the moment this repository does not contain much in the way of explicit unit-test coverage, so `perft` is the main built-in correctness tool.
+Perft is available through UCI and is the main move-generation correctness
+check:
 
-## Notes for Engine Developers
+```text
+position startpos
+go perft 6
+```
 
-- The transposition table size defaults to 16 MB in the UCI front-end.
-- TT entry count is rounded down to a power of two.
-- The evaluation is intentionally simple, so search changes are relatively easy to observe in isolation.
-- The move generator is already doing the nontrivial legality work: pins, checks, castling, and en passant edge cases.
+For strength testing I use paired games with an opening suite so that both
+engines play each opening from both colors.
 
+## Current limitations
+
+- Search is single-threaded.
+- The transposition table is fixed at 16 MiB; UCI `setoption` is not implemented yet.
+- Search runs on the UCI thread, so `stop` cannot interrupt an active search yet.
+- Pondering is not implemented.
+- There are no tablebases or NNUE evaluation.
+- Automated test coverage is still small; perft and engine matches do most of
+  the practical validation.
+
+## Code map
+
+- [`src/position.zig`](src/position.zig) — position state, legal moves, and
+  make/unmake
+- [`src/search.zig`](src/search.zig) — iterative deepening, alpha-beta, pruning,
+  and time management
+- [`src/movepick.zig`](src/movepick.zig) — move ordering and static exchange
+  evaluation
+- [`src/eval.zig`](src/eval.zig) — handcrafted tapered evaluation
+- [`src/tt.zig`](src/tt.zig) — transposition table
+- [`src/uci.zig`](src/uci.zig) — UCI command loop
+- [`src/perft.zig`](src/perft.zig) — perft driver
+
+## Acknowledgements
+
+I have learned a great deal from these projects and resources:
+
+- The [Chess Programming Wiki](https://www.chessprogramming.org/Main_Page),
+- [Avalanche](https://github.com/SnowballSH/Avalanche), an open-source chess
+  engine written in Zig and a useful example of chess-engine ideas expressed in
+  the language
+- [Stockfish](https://github.com/official-stockfish/Stockfish), both as a
+  reference implementation and as an example of how modern engine techniques
+  fit together
+
+## AI disclosure
+
+The header image was generated with an AI image tool. I also use AI tools to
+help me understand chess-programming and Zig concepts, review problems, and
+debug ideas. Zaraki remains an author-led project: its design and source are
+manually authored, reviewed, tested, and maintained by me. Some targeted code and
+documentation changes have been made with AI assistance.
+
+## Releases
+
+The release workflow is triggered by tags beginning with `v`. A release tag can
+be created with:
+
+Tagged builds are configured for Linux x86-64 and ARM64, Windows x86-64, and
+macOS on Intel and Apple Silicon.
