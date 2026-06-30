@@ -16,7 +16,7 @@ pub fn perft(io: std.Io, position: *Position, depth: usize) !usize {
     for (move_list.moves[0..move_list.count]) |m| {
         try position.makeMove(m.move);
         const nodes = try perftInner(position, depth - 1);
-        try position.unmakeMove(m.move);
+        position.unmakeMove(m.move);
 
         std.debug.print("{s}{s}: {d}\n", .{ utils.idx2san(m.move.from_sq), utils.idx2san(m.move.to_sq), nodes });
         total += nodes;
@@ -40,7 +40,7 @@ fn perftInner(position: *Position, depth: usize) !usize {
     for (move_list.moves[0..move_list.count]) |m| {
         try position.makeMove(m.move);
         nodes += try perftInner(position, depth - 1);
-        try position.unmakeMove(m.move);
+        position.unmakeMove(m.move);
     }
 
     return nodes;
