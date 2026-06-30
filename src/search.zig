@@ -64,6 +64,11 @@ pub const SearchStats = struct {
     tt_stores: usize = 0,
 };
 
+pub const TimeBudget = struct {
+    hard_cap_ms: u64,
+    soft_cap_ms: ?u64,
+};
+
 pub const Searcher = struct {
     tt: *tt.TranspositionTable,
     allocator: std.mem.Allocator,
@@ -83,11 +88,12 @@ pub const Searcher = struct {
     killers: [MAX_SEARCH_PLY][2]mv.Move = undefined,
 
     should_stop: bool = false,
-    move_time_millis: usize = 0,
+    move_time_millis: ?u64 = null,
     timer: ?std.Io.Timestamp = null,
 
     best_move_so_far: ?mv.Move = null,
     depth_completed: usize = 0,
+    seldepth: usize = 0,
 
     hash_history: [MAX_HASH_HISTORY]u64 = std.mem.zeroes([MAX_HASH_HISTORY]u64),
     hash_history_length: usize = 0,
@@ -106,6 +112,10 @@ pub const Searcher = struct {
         self.killers = std.mem.zeroes([MAX_SEARCH_PLY][2]mv.Move);
         self.history = std.mem.zeroes([2][64][64]i32);
         self.stats = .{};
+        self.best_move_so_far = null;
+        self.depth_completed = 0;
+        self.seldepth = 0;
+        self.move_time_millis = null;
     }
 
     pub fn resetPerGame(self: *Searcher) void {
@@ -153,15 +163,48 @@ pub const Searcher = struct {
         return false;
     }
 
+    fn makeMoveWithDiagnostics(position: *Position, move: mv.Move, ply: usize, phase: []const u8, remaining_depth: ?usize) !void {
+        position.makeMove(move) catch |err| {
+            std.debug.print(
+                "search makeMove failed: error={s} phase={s} ply={} remaining_depth={any} move={s}{s} flags={s} side={s} hash=0x{x} board_state={any} bbs={any}\n",
+                .{
+                    @errorName(err),
+                    phase,
+                    ply,
+                    remaining_depth,
+                    utils.idx2san(move.from_sq),
+                    utils.idx2san(move.to_sq),
+                    @tagName(move.flags),
+                    @tagName(position.board_state.side_to_move),
+                    position.hash,
+                    position.board_state,
+                    position.bbs,
+                },
+            );
+            return err;
+        };
+    }
+
     pub fn think(self: *Searcher, position: *Position, search_limits: SearchLimits) !mv.Move {
+        const root_position = position.*;
+        defer position.* = root_position;
+
         const depth = search_limits.depth orelse 99;
-        const movetime_budget_ms = self.computeBudget(search_limits, position.board_state.side_to_move);
-        self.move_time_millis = movetime_budget_ms orelse 0;
         if (depth == 0) return error.InvalidDepth;
         self.resetPerSearch();
-        self.gen = (self.gen + 1) & 15;
 
+        const budget = self.computeBudget(position, search_limits);
+        self.move_time_millis = if (budget) |b| b.hard_cap_ms else null;
+        const soft_cap = if (budget) |b| b.soft_cap_ms else null;
+
+        self.gen = (self.gen + 1) & 15;
         self.timer = std.Io.Clock.now(.awake, self.io);
+
+        var root_moves = mv.MoveList{};
+        try position.generateMoves(&root_moves);
+        if (root_moves.count == 0) return error.NoLegalMoves;
+        self.best_move_so_far = root_moves.moves[0].move;
+
         var d: usize = 1;
         var prev_score: i32 = 0;
         outer: while (d <= depth) : (d += 1) {
@@ -171,7 +214,9 @@ pub const Searcher = struct {
 
             inner: while (true) {
                 const score = negamax(self, position, alpha, beta, d, 0, true, false, true) catch |err| switch (err) {
-                    SearcherError.SearchStopped => break :outer,
+                    SearcherError.SearchStopped => {
+                        break :outer;
+                    },
                     else => return err,
                 };
 
@@ -198,8 +243,8 @@ pub const Searcher = struct {
                 0;
 
             if (self.stdout) |out| {
-                try out.print("info depth {} nodes {} time {} nps {}\n", .{
-                    d, self.nodes, elapsed_ms, nps,
+                try out.print("info depth {} seldepth {} nodes {} time {} nps {}\n", .{
+                    d, self.seldepth, self.nodes, elapsed_ms, nps,
                 });
                 try out.print("info score cp {}\n", .{prev_score});
                 try out.print("info tt_probes {} tt_hits {} tt_usable {} tt_cutoffs {} tt_cutoffs_exact {} tt_cutoffs_lower {} tt_cutoffs_upper {} tt_move_used {} tt_stores {} \n", .{ self.stats.tt_probes, self.stats.tt_hits, self.stats.tt_usable, self.stats.tt_cutoffs_exact + self.stats.tt_cutoffs_lower + self.stats.tt_cutoffs_upper, self.stats.tt_cutoffs_exact, self.stats.tt_cutoffs_lower, self.stats.tt_cutoffs_upper, self.stats.tt_move_used, self.stats.tt_stores });
@@ -208,12 +253,17 @@ pub const Searcher = struct {
             }
 
             self.depth_completed = d;
+
+            if (soft_cap) |sc| {
+                if (elapsed_ms >= sc) return self.best_move_so_far orelse self.pv[0][0];
+            }
         }
 
         return self.best_move_so_far orelse self.pv[0][0];
     }
 
     fn negamax(self: *Searcher, position: *Position, alpha: i32, beta: i32, _depth: usize, ply: usize, is_root: bool, is_null: bool, is_pv: bool) !i32 {
+        self.seldepth = @max(self.seldepth, ply);
         self.pv_length[ply] = 0;
         var depth: usize = _depth;
 
@@ -221,7 +271,7 @@ pub const Searcher = struct {
 
         self.nodes += 1;
 
-        if (self.nodes & 4095 == 0 and self.shouldStop() and self.depth_completed >= 1) {
+        if (self.nodes & 1023 == 0 and self.shouldStop()) {
             return error.SearchStopped;
         }
 
@@ -271,7 +321,9 @@ pub const Searcher = struct {
             return -MATE + @as(i32, @intCast(ply));
         }
 
-        if (position.inCheck()) depth += 1;
+        const in_check = position.inCheck();
+
+        if (in_check) depth += 1;
 
         // Null-Move-Pruning
         const color_offset: usize = if (position.board_state.side_to_move == .Black) 6 else 0;
@@ -280,6 +332,7 @@ pub const Searcher = struct {
             var R: usize = 2 + @divTrunc(depth, 6);
             R = @min(R, depth);
             position.makeNullMove();
+            errdefer position.unmakeNullMove();
             const score = -(try negamax(self, position, -beta, -(beta - 1), depth - R, ply + 1, false, true, false));
             position.unmakeNullMove();
 
@@ -301,8 +354,10 @@ pub const Searcher = struct {
                 if (i == 0 and sm.move.toU16() == hm.toU16()) self.stats.tt_move_used += 1;
             }
 
-            try position.makeMove(sm.move);
+            try makeMoveWithDiagnostics(position, sm.move, ply, "negamax", depth);
+            errdefer position.unmakeMove(sm.move);
             self.pushRepetition(position.hash);
+            errdefer self.popRepetition();
 
             const child_is_pv = i == 0 and is_pv;
 
@@ -313,7 +368,7 @@ pub const Searcher = struct {
             } else {
                 const flags_int = @intFromEnum(sm.move.flags);
                 const is_quiet = (flags_int & 0b1100) == 0;
-                const do_lmr = depth >= 3 and i >= 3 and !position.inCheck() and is_quiet;
+                const do_lmr = depth >= 3 and i >= 3 and !position.inCheck() and !in_check and is_quiet;
                 const reduction = if (do_lmr) tables.lookupLmrReduction(@intCast(depth), @intCast(i)) else 0;
                 const base_depth = depth - 1;
                 const reduced_depth = if (reduction > 0) @max(@as(usize, 1), base_depth -| reduction) else base_depth;
@@ -330,7 +385,7 @@ pub const Searcher = struct {
             }
 
             self.popRepetition();
-            try position.unmakeMove(sm.move);
+            position.unmakeMove(sm.move);
 
             if (score >= beta) {
                 if (tt_enable) {
@@ -391,8 +446,9 @@ pub const Searcher = struct {
     }
 
     fn quiescenceSearch(self: *Searcher, position: *Position, alpha_: i32, beta: i32, ply: usize) !i32 {
+        self.seldepth = @max(self.seldepth, ply);
         self.nodes += 1;
-        if (self.nodes & 4095 == 0 and self.shouldStop() and self.depth_completed >= 1) {
+        if (self.nodes & 1023 == 0 and self.shouldStop()) {
             return error.SearchStopped;
         }
 
@@ -427,27 +483,38 @@ pub const Searcher = struct {
             }
         }
 
+        const in_check = position.inCheck();
+
         const static_eval = eval(position);
-        if (static_eval >= beta) return static_eval;
 
-        var delta: i32 = 1_000;
+        var alpha: i32 = alpha_;
 
-        const pawns_tobe_queen = position.bbs[@intFromEnum(PieceType.Pawn) + @as(usize, if (position.board_state.side_to_move == .Black) 6 else 0)] & utils.relativeRank(6, position.board_state.side_to_move);
-        if (pawns_tobe_queen != 0) {
-            delta += 775;
+        if (!in_check) {
+            if (static_eval >= beta) return static_eval;
+
+            var delta: i32 = 1_000;
+
+            const pawns_tobe_queen = position.bbs[@intFromEnum(PieceType.Pawn) + @as(usize, if (position.board_state.side_to_move == .Black) 6 else 0)] & utils.relativeRank(6, position.board_state.side_to_move);
+            if (pawns_tobe_queen != 0) {
+                delta += 775;
+            }
+
+            if (static_eval < (alpha_ - delta)) {
+                return alpha_;
+            }
+
+            alpha = if (static_eval > alpha_) static_eval else alpha_;
         }
-
-        if (static_eval < (alpha_ - delta)) {
-            return alpha_;
-        }
-
-        var alpha: i32 = if (static_eval > alpha_) static_eval else alpha_;
 
         const move_list_ptr = &self.move_lists[ply];
-        try position.generateCaptureMoves(move_list_ptr);
+        if (in_check) try position.generateMoves(move_list_ptr) else try position.generateCaptureMoves(move_list_ptr);
+
+        if (in_check and move_list_ptr.count == 0)
+            return -MATE + @as(i32, @intCast(ply));
+
         movepick.scoreMoves(position, self, ply, move_list_ptr, hash_move);
 
-        var max = static_eval;
+        var max = if (in_check) -INF else static_eval;
         var i: usize = 0;
         loop: while (i < move_list_ptr.count) : (i += 1) {
             const sm = move_list_ptr.pickNext(i);
@@ -456,10 +523,10 @@ pub const Searcher = struct {
                 if (i == 0 and sm.move.toU16() == hm.toU16()) self.stats.tt_move_used += 1;
             }
             // SEE Pruning
-            if (sm.score < 1_000_000) break;
+            if (sm.score < 1_000_000 and !in_check) break;
 
             // Delta Pruning
-            if (@intFromEnum(sm.move.flags) & @intFromEnum(mv.MoveFlags.CAPTURE) != 0) {
+            if (@intFromEnum(sm.move.flags) & @intFromEnum(mv.MoveFlags.CAPTURE) != 0 and !in_check) {
                 const per_move_delta: i32 = 200;
                 const captured_piece_sq = blk: {
                     if (sm.move.flags != .EP_CAPTURE) break :blk sm.move.to_sq;
@@ -479,11 +546,13 @@ pub const Searcher = struct {
                 if (static_eval + piece_value + prom_gain + per_move_delta < alpha) continue :loop;
             }
 
-            try position.makeMove(sm.move);
+            try makeMoveWithDiagnostics(position, sm.move, ply, "quiescence", null);
+            errdefer position.unmakeMove(sm.move);
             self.pushRepetition(position.hash);
+            errdefer self.popRepetition();
             const score = -(try quiescenceSearch(self, position, -beta, -alpha, ply + 1));
             self.popRepetition();
-            try position.unmakeMove(sm.move);
+            position.unmakeMove(sm.move);
             if (score >= beta) return score;
             if (score > max) max = score;
             if (score > alpha) alpha = score;
@@ -492,25 +561,45 @@ pub const Searcher = struct {
     }
 
     fn shouldStop(self: *Searcher) bool {
-        const time_stop: bool = blk: {
-            if (self.move_time_millis == 0) break :blk false;
-            const elapsed_ns = self.timer.?.durationTo(std.Io.Clock.now(.awake, self.io)).toNanoseconds();
-            const elapsed_ms = @divTrunc(elapsed_ns, 1_000_000);
-            break :blk elapsed_ms >= self.move_time_millis;
-        };
-        return self.should_stop or time_stop;
+        if (self.should_stop) return true;
+
+        const hard_cap = self.move_time_millis orelse return false;
+        const elapsed_ns = self.timer.?.durationTo(
+            std.Io.Clock.now(.awake, self.io),
+        ).toNanoseconds();
+        const elapsed_ms = @divTrunc(elapsed_ns, 1_000_000);
+        return elapsed_ms >= hard_cap;
     }
 
-    fn computeBudget(_: *Searcher, limits: SearchLimits, side: utils.Color) ?u64 {
+    fn computeBudget(_: *Searcher, pos: *Position, limits: SearchLimits) ?TimeBudget {
         if (limits.infinite) return null; // no time limit
-        if (limits.movetime_ms) |t| return t;
+        //
+        const safety: u64 = 30;
+        if (limits.movetime_ms) |t| return .{ .hard_cap_ms = @max(t -| safety, 1), .soft_cap_ms = null };
 
+        const side = pos.board_state.side_to_move;
         const time_left = if (side == .White) limits.wtime_ms else limits.btime_ms;
-        const inc = if (side == .White) limits.winc_ms else limits.binc_ms;
+        const inc = (if (side == .White) limits.winc_ms else limits.binc_ms) orelse 0;
 
         if (time_left) |t| {
-            const base = t / 30;
-            return base + (inc orelse 0);
+            const move_number: u64 = pos.board_state.fullmove_number;
+            const remaining_moves: u64 = @max(10, 40 -| move_number);
+
+            const raw_soft = (t / remaining_moves) +| (inc / 2);
+            const absolute_ceiling = @max(t -| safety, 1);
+            const strategic_cap =
+                @max(@min(t / 5, absolute_ceiling), 1);
+
+            const hard = @max(
+                @min(raw_soft *| 2, strategic_cap),
+                1,
+            );
+            const soft = @min(@max(raw_soft, 1), hard);
+
+            return .{
+                .hard_cap_ms = hard,
+                .soft_cap_ms = soft,
+            };
         }
         return null;
     }
