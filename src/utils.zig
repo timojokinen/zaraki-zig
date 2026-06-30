@@ -8,6 +8,10 @@ pub const Color = enum(u1) {
     pub inline fn opp(self: Color) Color {
         return @enumFromInt(@intFromEnum(self) ^ 1);
     }
+    pub inline fn piecetype_offset(self: Color) usize {
+        if (self == .White) return 0;
+        return 6;
+    }
 };
 
 pub const Bitboard = u64;
