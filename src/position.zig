@@ -44,9 +44,22 @@ pub const Position = struct {
 
     pub fn makeMove(self: *Position, move: Move) !void {
         const piece_type: ?PieceType = self.pieceAt(move.from_sq);
-        if (piece_type == null) return error.InvalidMove;
+        if (piece_type == null) return error.MissingSourcePiece;
 
         const captured_piece_type = self.pieceAt(move.to_sq);
+        const move_flags: u4 = @intFromEnum(move.flags);
+        const is_capture = move_flags & 0b0100 != 0;
+        const is_promotion = move_flags & 0b1000 != 0;
+        const is_ep = move.flags == .EP_CAPTURE;
+        const is_castle = move.flags == .KING_CASTLE or move.flags == .QUEEN_CASTLE;
+
+        if (is_capture and !is_ep and captured_piece_type == null)
+            return error.MissingCapturePiece;
+        if (is_capture and !is_ep and captured_piece_type == .King)
+            return error.CapturesKing;
+        if (is_ep and self.board_state.en_passant_square == null)
+            return error.MissingEnPassantSquare;
+
         self.undo_stack[self.undo_index] = .{
             .captured_piece = captured_piece_type,
             .castling_rights = self.board_state.castling_rights,
@@ -64,19 +77,12 @@ pub const Position = struct {
         const to_bb: Bitboard = @as(u64, 1) << move.to_sq;
         const from_to_bb: Bitboard = from_bb ^ to_bb;
 
-        const move_flags: u4 = @intFromEnum(move.flags);
-        const is_capture = move_flags & 0b0100 != 0;
-        const is_promotion = move_flags & 0b1000 != 0;
-        const is_ep = move.flags == .EP_CAPTURE;
-        const is_castle = move.flags == .KING_CASTLE or move.flags == .QUEEN_CASTLE;
-
         var piece_sqs = if (!is_promotion) from_to_bb else from_bb;
         self.bbs[@intFromEnum(piece_type.?) + color_offset] ^= piece_sqs;
         while (piece_sqs != 0) : (piece_sqs &= piece_sqs - 1)
             self.hash ^= zobrist.piece_keys[@intFromEnum(piece_type.?) + color_offset][@ctz(piece_sqs)];
 
         if (is_capture and !is_ep) {
-            if (captured_piece_type == null) return error.InvalidMove;
             self.bbs[@intFromEnum(captured_piece_type.?) + opp_color_offset] ^= to_bb;
             self.hash ^= zobrist.piece_keys[@intFromEnum(captured_piece_type.?) + opp_color_offset][move.to_sq];
         }
@@ -143,7 +149,7 @@ pub const Position = struct {
         self.hash ^= zobrist.black_key;
     }
 
-    pub fn unmakeMove(self: *Position, move: Move) !void {
+    pub fn unmakeMove(self: *Position, move: Move) void {
         self.undo_index -= 1;
         const undo = self.undo_stack[self.undo_index];
         self.board_state.castling_rights = undo.castling_rights;
@@ -152,7 +158,7 @@ pub const Position = struct {
         self.hash = undo.hash;
 
         const piece_type = self.pieceAt(move.to_sq);
-        if (piece_type == null) return error.InvalidMove;
+        if (piece_type == null) @panic("Invalid move supplied to unmakeMove");
 
         const opp_color = self.board_state.side_to_move;
         const ally_color = opp_color.opp();
@@ -249,12 +255,15 @@ pub const Position = struct {
     }
 
     pub fn inCheck(self: Position) bool {
-        const ally_color: Color = self.board_state.side_to_move;
-        const color_offset: usize = if (ally_color == Color.Black) 6 else 0;
+        return self.inCheckFor(self.board_state.side_to_move);
+    }
+
+    pub fn inCheckFor(self: Position, color: Color) bool {
+        const color_offset: usize = if (color == Color.Black) 6 else 0;
         const all_pieces_bb: Bitboard = utils.combineBitboards(&self.bbs);
         const king_bb: Bitboard = self.bbs[@intFromEnum(PieceType.King) + color_offset];
         const king_sq: u6 = @intCast(@ctz(king_bb));
-        const king_attackers: Bitboard = attacks.squareAttackers(king_sq, ally_color.opp(), self.bbs, all_pieces_bb);
+        const king_attackers: Bitboard = attacks.squareAttackers(king_sq, color.opp(), self.bbs, all_pieces_bb);
         return king_attackers > 0;
     }
 
@@ -447,12 +456,21 @@ pub const Position = struct {
         var bishops_bb = self.bbs[@intFromEnum(PieceType.Bishop) + color_offset];
         while (bishops_bb != 0) : (bishops_bb &= bishops_bb - 1) {
             const from_sq: u6 = @intCast(@ctz(bishops_bb));
-            var att: Bitboard = tables.lookupBishopAttacks(from_sq, all_pieces_bb) & ~ally_pieces_bb & check_mask;
-            if (pinned_pieces & @as(u64, 1) << from_sq != 0) {
-                const bishop_queen_pinning_bishop = bishop_queen_pinners & att;
-                if (bishop_queen_pinning_bishop == 0) continue;
-                att &= tables.lookupSquaresBetween(@intCast(@ctz(bishop_queen_pinning_bishop)), king_sq) | bishop_queen_pinning_bishop;
+            const from_bb: Bitboard = @as(u64, 1) << from_sq;
+            const raw_att: Bitboard = tables.lookupBishopAttacks(from_sq, all_pieces_bb);
+            var pin_mask: Bitboard = ~@as(Bitboard, 0);
+
+            if (pinned_pieces & from_bb != 0) {
+                var pot_pinners: Bitboard = bishop_queen_pinners | rook_queen_pinners;
+                while (pot_pinners != 0) : (pot_pinners &= pot_pinners - 1) {
+                    const pot_pinner: u6 = @intCast(@ctz(pot_pinners));
+                    const pinner_ray: Bitboard = tables.lookupSquaresBetween(king_sq, pot_pinner) | (@as(u64, 1) << pot_pinner);
+                    if (pinner_ray & from_bb != 0)
+                        pin_mask &= pinner_ray;
+                }
             }
+
+            const att: Bitboard = raw_att & ~ally_pieces_bb & check_mask & pin_mask;
 
             var quiet: Bitboard = att & ~opp_pieces_bb;
             var capture: Bitboard = att & opp_pieces_bb;
@@ -667,12 +685,21 @@ pub const Position = struct {
         var bishops_bb = self.bbs[@intFromEnum(PieceType.Bishop) + color_offset];
         while (bishops_bb != 0) : (bishops_bb &= bishops_bb - 1) {
             const from_sq: u6 = @intCast(@ctz(bishops_bb));
-            var att: Bitboard = tables.lookupBishopAttacks(from_sq, all_pieces_bb) & ~ally_pieces_bb & check_mask;
-            if (pinned_pieces & @as(u64, 1) << from_sq != 0) {
-                const bishop_queen_pinning_bishop = bishop_queen_pinners & att;
-                if (bishop_queen_pinning_bishop == 0) continue;
-                att &= tables.lookupSquaresBetween(@intCast(@ctz(bishop_queen_pinning_bishop)), king_sq) | bishop_queen_pinning_bishop;
+            const from_bb: Bitboard = @as(u64, 1) << from_sq;
+            const raw_att: Bitboard = tables.lookupBishopAttacks(from_sq, all_pieces_bb);
+            var pin_mask: Bitboard = ~@as(Bitboard, 0);
+
+            if (pinned_pieces & from_bb != 0) {
+                var pot_pinners: Bitboard = bishop_queen_pinners | rook_queen_pinners;
+                while (pot_pinners != 0) : (pot_pinners &= pot_pinners - 1) {
+                    const pot_pinner: u6 = @intCast(@ctz(pot_pinners));
+                    const pinner_ray: Bitboard = tables.lookupSquaresBetween(king_sq, pot_pinner) | (@as(u64, 1) << pot_pinner);
+                    if (pinner_ray & from_bb != 0)
+                        pin_mask &= pinner_ray;
+                }
             }
+
+            const att: Bitboard = raw_att & ~ally_pieces_bb & check_mask & pin_mask;
 
             var capture: Bitboard = att & opp_pieces_bb;
 
