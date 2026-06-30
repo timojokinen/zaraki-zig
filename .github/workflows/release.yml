@@ -1,0 +1,123 @@
+name: Release
+  on:
+    push:
+      tags:
+        - "v*"
+
+  permissions:
+    contents: read
+
+  env:
+    ZIG_VERSION: "0.16.0"
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+
+      steps:
+        - uses: actions/checkout@v6
+
+        - uses: mlugg/setup-zig@v2
+          with:
+            version: ${{ env.ZIG_VERSION }}
+
+        - run: zig build test
+
+    build:
+      needs: test
+      runs-on: ubuntu-latest
+
+      strategy:
+        fail-fast: false
+        matrix:
+          include:
+            - target: x86_64-linux-musl
+              platform: linux-x86_64
+              binary: zaraki_engine
+              format: tar
+
+            - target: aarch64-linux-musl
+              platform: linux-aarch64
+              binary: zaraki_engine
+              format: tar
+
+            - target: x86_64-windows-gnu
+              platform: windows-x86_64
+              binary: zaraki_engine.exe
+              format: zip
+
+            - target: x86_64-macos
+              platform: macos-x86_64
+              binary: zaraki_engine
+              format: tar
+
+            - target: aarch64-macos
+              platform: macos-aarch64
+              binary: zaraki_engine
+              format: tar
+
+      steps:
+        - uses: actions/checkout@v6
+
+        - uses: mlugg/setup-zig@v2
+          with:
+            version: ${{ env.ZIG_VERSION }}
+
+        - name: Build
+          run: |
+            zig build \
+              -Doptimize=ReleaseFast \
+              -Dtarget=${{ matrix.target }} \
+              -Dengine_version=${{ github.ref_name }} \
+              --prefix staging
+
+        - name: Package
+          id: package
+          shell: bash
+          run: |
+            set -euo pipefail
+
+            asset="zaraki-${GITHUB_REF_NAME}-${{ matrix.platform }}"
+            mkdir package
+            cp "staging/bin/${{ matrix.binary }}" package/
+
+            if [[ "${{ matrix.format }}" == "zip" ]]; then
+              (cd package && zip -9 "../${asset}.zip" "${{ matrix.binary }}")
+              echo "asset=${asset}.zip" >> "$GITHUB_OUTPUT"
+            else
+              tar -C package -czf "${asset}.tar.gz" "${{ matrix.binary }}"
+              echo "asset=${asset}.tar.gz" >> "$GITHUB_OUTPUT"
+            fi
+
+        - uses: actions/upload-artifact@v7
+          with:
+            name: release-${{ matrix.platform }}
+            path: ${{ steps.package.outputs.asset }}
+            if-no-files-found: error
+
+    release:
+      needs: build
+      runs-on: ubuntu-latest
+
+      permissions:
+        contents: write
+
+      steps:
+        - uses: actions/download-artifact@v8
+          with:
+            path: dist
+            merge-multiple: true
+
+        - name: Create checksums
+          working-directory: dist
+          run: sha256sum *.tar.gz *.zip > SHA256SUMS
+
+        - name: Create GitHub release
+          env:
+            GH_TOKEN: ${{ github.token }}
+          run: |
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --title "Zaraki $GITHUB_REF_NAME"
