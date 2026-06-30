@@ -128,7 +128,8 @@ pub const UCIInterface = struct {
                     const maybe_moves_kw = cmd_parts.next() orelse continue;
                     if (!std.mem.eql(u8, maybe_moves_kw, "moves")) continue;
                     while (cmd_parts.next()) |move_str| {
-                        applyUciMove(&self.position, move_str) catch {};
+                        applyUciMove(&self.position, move_str) catch break;
+                        self.searcher.pushRepetition(self.position.hash);
                     }
                 },
                 .go => {
