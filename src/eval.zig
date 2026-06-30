@@ -1,6 +1,8 @@
 const Position = @import("position.zig").Position;
 const PieceType = @import("piece.zig").PieceType;
 const Color = @import("utils.zig").Color;
+const tb = @import("tables.zig");
+const utils = @import("utils.zig");
 
 // https://www.chessprogramming.org/PeSTO%27s_Evaluation_Function
 
@@ -141,6 +143,17 @@ const eg_king_table: [64]i32 = .{
 const mg_value = [_]i32{ 82, 337, 365, 477, 1025, 0 }; // pawn, knight, bishop, rook, queen, king
 const eg_value = [_]i32{ 94, 281, 297, 512, 936, 0 };
 
+const mobility_bonus_per_sq_mg: [6]i32 = .{ 0, 4, 4, 2, 1, 0 };
+const mobility_bonus_per_sq_eg: [6]i32 = .{ 0, 2, 3, 2, 1, 0 };
+
+const stm_bonus: i32 = 10;
+
+const bishop_pair_bonus: i32 = 30;
+
+const check_bonus: i32 = 15;
+
+const pawn_shield_penalty: i32 = 20;
+
 const mg_pst: [6][64]i32 = blk: {
     var tables: [6][64]i32 = undefined;
     const raw = [6][64]i32{ mg_pawn_table, mg_knight_table, mg_bishop_table, mg_rook_table, mg_queen_table, mg_king_table };
@@ -164,10 +177,9 @@ const eg_pst: [6][64]i32 = blk: {
 };
 const phase_inc: [6]i32 = .{ 0, 1, 1, 2, 4, 0 };
 
-fn positionalScore(pos: *const Position) i32 {
+fn positionalScore(pos: *const Position) struct { i32, i32 } {
     var mg = [_]i32{ 0, 0 };
     var eg = [_]i32{ 0, 0 };
-    var phase: i32 = 0;
 
     inline for (0..6) |pt_idx| {
         var bb = pos.bbs[pt_idx];
@@ -175,7 +187,6 @@ fn positionalScore(pos: *const Position) i32 {
             const sq = @ctz(bb);
             mg[0] += mg_pst[pt_idx][sq];
             eg[0] += eg_pst[pt_idx][sq];
-            phase += phase_inc[pt_idx];
         }
 
         var bb_black = pos.bbs[pt_idx + 6];
@@ -183,12 +194,98 @@ fn positionalScore(pos: *const Position) i32 {
             const sq = @ctz(bb_black);
             mg[1] += mg_pst[pt_idx][sq ^ 56];
             eg[1] += eg_pst[pt_idx][sq ^ 56];
-            phase += phase_inc[pt_idx];
         }
     }
 
     const mg_score = mg[@intFromEnum(pos.board_state.side_to_move)] - mg[@intFromEnum(pos.board_state.side_to_move.opp())];
     const eg_score = eg[@intFromEnum(pos.board_state.side_to_move)] - eg[@intFromEnum(pos.board_state.side_to_move.opp())];
+
+    return .{ mg_score, eg_score };
+}
+
+fn mobilityScore(pos: *const Position) struct { i32, i32 } {
+    var white_occ: u64 = 0;
+    var black_occ: u64 = 0;
+    inline for (0..6) |idx| {
+        white_occ |= pos.bbs[idx];
+        black_occ |= pos.bbs[idx + 6];
+    }
+
+    var mg: [2]i32 = .{ 0, 0 };
+    var eg: [2]i32 = .{ 0, 0 };
+
+    inline for (0..12) |idx| {
+        const is_black = idx >= 6;
+        const ally_pieces_occ = if (is_black) black_occ else white_occ;
+        var piece_occ: u64 = pos.bbs[idx];
+        while (piece_occ != 0) : (piece_occ &= piece_occ - 1) {
+            const pt_idx = idx % 6;
+            const from_sq: u6 = @intCast(@ctz(piece_occ));
+            var att: u64 = 0;
+            switch (@as(PieceType, @enumFromInt(pt_idx))) {
+                .Knight => {
+                    att = tb.lookupKnightAttacks(from_sq);
+                },
+                .Bishop => {
+                    att = tb.lookupBishopAttacks(from_sq, white_occ | black_occ);
+                },
+                .Rook => {
+                    att = tb.lookupRookAttacks(from_sq, white_occ | black_occ);
+                },
+                .Queen => {
+                    att = tb.lookupQueenAttacks(from_sq, white_occ | black_occ);
+                },
+                else => {},
+            }
+
+            att &= ~ally_pieces_occ;
+            const move_count = @popCount(att);
+            mg[if (is_black) 1 else 0] += move_count * mobility_bonus_per_sq_mg[pt_idx];
+            eg[if (is_black) 1 else 0] += move_count * mobility_bonus_per_sq_eg[pt_idx];
+        }
+    }
+
+    const mg_score = mg[@intFromEnum(pos.board_state.side_to_move)] - mg[@intFromEnum(pos.board_state.side_to_move.opp())];
+    const eg_score = eg[@intFromEnum(pos.board_state.side_to_move)] - eg[@intFromEnum(pos.board_state.side_to_move.opp())];
+
+    return .{ mg_score, eg_score };
+}
+
+pub fn kingSafetyScore(pos: *const Position, color: Color) struct { i32, i32 } {
+    var score: i32 = 0;
+    const king_sq = @ctz(pos.bbs[@intFromEnum(PieceType.King) + color.piecetype_offset()]);
+    const pawns_occ = pos.bbs[@intFromEnum(PieceType.Pawn) + color.piecetype_offset()];
+    const king_file = utils.maskFile(@intCast(king_sq));
+    const king_rank = utils.maskRank(@intCast(king_sq));
+
+    const pawn_shield_rank = if (color == .White) king_rank << 8 else king_rank >> 8;
+    const east_file = (king_file & ~utils.FILES[7]) << 1;
+    const west_file = (king_file & ~utils.FILES[0]) >> 1;
+
+    const pawn_shield_mask = (king_file | east_file | west_file) & pawn_shield_rank;
+
+    const missing_pawns_count = @popCount(pawn_shield_mask) - @popCount(pawn_shield_mask & pawns_occ);
+
+    score -= missing_pawns_count * pawn_shield_penalty;
+
+    return .{ score, 0 };
+}
+
+pub fn taperEval(pos: *const Position, mg_score: i32, eg_score: i32) i32 {
+    var phase: i32 = 0;
+
+    inline for (0..6) |pt_idx| {
+        var bb = pos.bbs[pt_idx];
+        while (bb != 0) : (bb &= bb - 1) {
+            phase += phase_inc[pt_idx];
+        }
+
+        var bb_black = pos.bbs[pt_idx + 6];
+        while (bb_black != 0) : (bb_black &= bb_black - 1) {
+            phase += phase_inc[pt_idx];
+        }
+    }
+
     var mg_phase = phase;
     if (mg_phase > 24) mg_phase = 24;
     const eg_phase = 24 - mg_phase;
@@ -196,7 +293,37 @@ fn positionalScore(pos: *const Position) i32 {
 }
 
 pub fn eval(pos: *const Position) i32 {
-    var score: i32 = 0;
-    score += positionalScore(pos);
+    var mg_score: i32 = 0;
+    var eg_score: i32 = 0;
+
+    const mg_score_positional, const eg_score_positional = positionalScore(pos);
+    mg_score += mg_score_positional;
+    eg_score += eg_score_positional;
+
+    const mg_score_mobility, const eg_score_mobility = mobilityScore(pos);
+    mg_score += mg_score_mobility;
+    eg_score += eg_score_mobility;
+
+    const k_safety_stm = kingSafetyScore(pos, pos.board_state.side_to_move);
+    const k_safety_opp = kingSafetyScore(pos, pos.board_state.side_to_move.opp());
+    mg_score += k_safety_stm[0] - k_safety_opp[0];
+    eg_score += k_safety_stm[1] - k_safety_opp[1];
+
+    var score = taperEval(pos, mg_score, eg_score);
+
+    // STM Bonus
+    score += stm_bonus;
+
+    // Bishop-Pair Bonus
+    const open_position_bonus: i32 = (16 - @popCount(pos.bbs[@intFromEnum(PieceType.Pawn)] | pos.bbs[@intFromEnum(PieceType.Pawn) + 6])) * 2;
+    const stm_bishop_pair_bonus: i32 = if (@popCount(pos.bbs[@intFromEnum(PieceType.Bishop) + pos.board_state.side_to_move.piecetype_offset()]) >= 2) bishop_pair_bonus + open_position_bonus else 0;
+    const opp_bishop_pair_bonus: i32 = if (@popCount(pos.bbs[@intFromEnum(PieceType.Bishop) + pos.board_state.side_to_move.opp().piecetype_offset()]) >= 2) bishop_pair_bonus + open_position_bonus else 0;
+    score += stm_bishop_pair_bonus - opp_bishop_pair_bonus;
+
+    // Check Bonus
+    if (pos.inCheck()) {
+        score -= check_bonus;
+    }
+
     return score;
 }
