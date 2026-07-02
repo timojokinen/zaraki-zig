@@ -33,26 +33,55 @@ jobs:
       matrix:
         include:
           - target: x86_64-linux-musl
+            cpu: baseline
             platform: linux-x86_64
             binary: zaraki_engine
             format: tar
 
+          - target: x86_64-linux-musl
+            cpu: baseline+bmi2
+            platform: linux-x86_64-bmi2
+            binary: zaraki_engine
+            format: tar
+
           - target: aarch64-linux-musl
+            cpu: baseline
             platform: linux-aarch64
             binary: zaraki_engine
             format: tar
 
           - target: x86_64-windows-gnu
+            cpu: baseline
             platform: windows-x86_64
             binary: zaraki_engine.exe
             format: zip
 
+          - target: x86_64-windows-gnu
+            cpu: baseline+bmi2
+            platform: windows-x86_64-bmi2
+            binary: zaraki_engine.exe
+            format: zip
+
+          - target: aarch64-windows-gnu
+            cpu: baseline
+            platform: windows-aarch64
+            binary: zaraki_engine.exe
+            format: zip
+
           - target: x86_64-macos
+            cpu: baseline
             platform: macos-x86_64
             binary: zaraki_engine
             format: tar
 
+          - target: x86_64-macos
+            cpu: baseline+bmi2
+            platform: macos-x86_64-bmi2
+            binary: zaraki_engine
+            format: tar
+
           - target: aarch64-macos
+            cpu: baseline
             platform: macos-aarch64
             binary: zaraki_engine
             format: tar
@@ -69,6 +98,7 @@ jobs:
           zig build \
             -Doptimize=ReleaseFast \
             -Dtarget=${{ matrix.target }} \
+            -Dcpu=${{ matrix.cpu }} \
             -Dengine_version=${{ github.ref_name }} \
             --prefix staging
 
