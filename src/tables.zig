@@ -1,14 +1,27 @@
 const std = @import("std");
 const attacks = @import("attacks.zig");
 const utils = @import("utils.zig");
+const magics = @import("magics.zig");
+const builtin = @import("builtin");
+
+pub const SliderMetadata = struct {
+    mask: u64,
+    offset: usize,
+
+    // Magic exclusive fields
+    magic: u64 = 0,
+    shift: u6 = 0,
+};
+
+const has_bmi2 = builtin.cpu.has(.x86, .bmi2);
 
 const BISHOP_TABLE_SIZE: usize = 5248;
 const ROOK_TABLE_SIZE: usize = 102400;
 
-var bishop_table: [BISHOP_TABLE_SIZE]u64 = undefined;
-var bishop_offsets: [64]u64 = undefined;
-var rook_table: [ROOK_TABLE_SIZE]u64 = undefined;
-var rook_offsets: [64]u64 = undefined;
+pub const SLIDER_TABLE_SIZE: usize = BISHOP_TABLE_SIZE + ROOK_TABLE_SIZE;
+
+var slider_metadata_table: [128]SliderMetadata = undefined;
+var slider_table: [SLIDER_TABLE_SIZE]u64 = undefined;
 
 var bishop_masks: [64]u64 = undefined;
 var rook_masks: [64]u64 = undefined;
@@ -37,15 +50,15 @@ pub fn lookupKingAttacks(sq: u6) utils.Bitboard {
 }
 
 pub fn lookupBishopAttacks(sq: u6, occupancy: utils.Bitboard) utils.Bitboard {
-    const index = utils.pext(occupancy, bishop_masks[@intCast(sq)]);
-    const offset = bishop_offsets[@intCast(sq)];
-    return bishop_table[offset + index];
+    const metadata = slider_metadata_table[@intCast(sq)];
+    const index = if (has_bmi2) utils.pext(occupancy, metadata.mask) else magics.calculateHashIdx(metadata.magic, occupancy & metadata.mask, metadata.shift);
+    return slider_table[metadata.offset + index];
 }
 
 pub fn lookupRookAttacks(sq: u6, occupancy: utils.Bitboard) utils.Bitboard {
-    const index = utils.pext(occupancy, rook_masks[@intCast(sq)]);
-    const offset = rook_offsets[@intCast(sq)];
-    return rook_table[offset + index];
+    const metadata = slider_metadata_table[@as(usize, sq) + 64];
+    const index = if (has_bmi2) utils.pext(occupancy, metadata.mask) else magics.calculateHashIdx(metadata.magic, occupancy & metadata.mask, metadata.shift);
+    return slider_table[metadata.offset + index];
 }
 
 pub fn lookupQueenAttacks(sq: u6, occupancy: utils.Bitboard) utils.Bitboard {
@@ -61,8 +74,6 @@ pub fn lookupLmrReduction(depth: usize, move_idx: usize) usize {
 }
 
 pub fn initTables() void {
-    var curr_bishop_offset: usize = 0;
-    var curr_rook_offset: usize = 0;
     // bishop masks
     for (0..64) |sq| {
         const edges =
@@ -77,39 +88,11 @@ pub fn initTables() void {
         const bishop_mask = (diag | anti_diag) & ~(edges) & ~(piece_bb);
         bishop_masks[sq] = bishop_mask;
 
-        // BISHOP ATTACKS
-        const relevant_bishop_bits = @popCount(bishop_mask);
-        const bishop_table_size = @as(u64, 1) << @intCast(relevant_bishop_bits);
-        bishop_offsets[sq] = curr_bishop_offset;
-        var bishop_subset: u64 = 0;
-        while (true) {
-            const bishop_attacks = attacks.bishopAttacks(@intCast(sq), bishop_subset);
-            const index = utils.pext(bishop_subset, bishop_mask);
-            bishop_table[curr_bishop_offset + index] = bishop_attacks;
-            bishop_subset = (bishop_subset -% bishop_mask) & bishop_mask;
-            if (bishop_subset == 0) break;
-        }
-        curr_bishop_offset += bishop_table_size;
-
         // ROOK MASKS
         const rank = utils.maskRank(@intCast(sq));
         const file = utils.maskFile(@intCast(sq));
         const rook_mask = (rank | file) & ~(edges) & ~(piece_bb);
         rook_masks[sq] = rook_mask;
-
-        // ROOK ATTACKS
-        const relevant_rook_bits = @popCount(rook_mask);
-        const rook_table_size = @as(u64, 1) << @intCast(relevant_rook_bits);
-        rook_offsets[sq] = curr_rook_offset;
-        var rook_subset: u64 = 0;
-        while (true) {
-            const rook_attacks = attacks.rookAttacks(@intCast(sq), rook_subset);
-            const index = utils.pext(rook_subset, rook_mask);
-            rook_table[curr_rook_offset + index] = rook_attacks;
-            rook_subset = (rook_subset -% rook_mask) & rook_mask;
-            if (rook_subset == 0) break;
-        }
-        curr_rook_offset += rook_table_size;
 
         knight_masks[sq] = attacks.knightAttacks(@intCast(sq));
         king_masks[sq] = attacks.kingAttacks(@intCast(sq));
@@ -146,5 +129,60 @@ pub fn initTables() void {
                 lmr[d][i] = @intFromFloat(0.99 + @log(@as(f64, @floatFromInt(depth))) * @log(@as(f64, @floatFromInt(i))) / 3.14);
             }
         }
+    }
+
+    if (has_bmi2) {
+        initSliderTablesForPEXT();
+    } else {
+        initSliderTablesForMagic();
+    }
+}
+
+fn initSliderTablesForPEXT() void {
+    var offset: usize = 0;
+    for (0..64) |sq| {
+        // BISHOP ATTACKS
+        const bishop_mask = bishop_masks[sq];
+        const relevant_bishop_bits = @popCount(bishop_mask);
+        const bishop_table_size = @as(u64, 1) << @intCast(relevant_bishop_bits);
+        var bishop_subset: u64 = 0;
+        while (true) {
+            const bishop_attacks = attacks.bishopAttacks(@intCast(sq), bishop_subset);
+            const index = utils.pext(bishop_subset, bishop_mask);
+            slider_table[offset + index] = bishop_attacks;
+            slider_metadata_table[sq] = .{ .mask = bishop_mask, .offset = offset };
+
+            bishop_subset = (bishop_subset -% bishop_mask) & bishop_mask;
+            if (bishop_subset == 0) break;
+        }
+        offset += bishop_table_size;
+
+        const rook_mask = rook_masks[sq];
+        // ROOK ATTACKS
+        const relevant_rook_bits = @popCount(rook_mask);
+        const rook_table_size = @as(u64, 1) << @intCast(relevant_rook_bits);
+        var rook_subset: u64 = 0;
+        while (true) {
+            const rook_attacks = attacks.rookAttacks(@intCast(sq), rook_subset);
+            const index = utils.pext(rook_subset, rook_mask);
+            slider_table[offset + index] = rook_attacks;
+            slider_metadata_table[64 + sq] = .{ .mask = rook_mask, .offset = offset };
+
+            rook_subset = (rook_subset -% rook_mask) & rook_mask;
+            if (rook_subset == 0) break;
+        }
+        offset += rook_table_size;
+    }
+}
+
+fn initSliderTablesForMagic() void {
+    var offset: usize = 0;
+
+    for (0..64) |sq| {
+        const bishop_magic = magics.initMagic(@intCast(sq), true, &offset, &slider_table);
+        slider_metadata_table[sq] = bishop_magic;
+
+        const rook_magic = magics.initMagic(@intCast(sq), false, &offset, &slider_table);
+        slider_metadata_table[sq + 64] = rook_magic;
     }
 }

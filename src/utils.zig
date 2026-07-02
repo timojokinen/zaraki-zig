@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const tables = @import("tables.zig");
 const Piece = @import("piece.zig").Piece;
@@ -155,11 +156,14 @@ pub fn combineBitboards(bbs: []const Bitboard) Bitboard {
 }
 
 pub fn pext(src: u64, mask: u64) u64 {
-    return asm ("pext %[mask], %[src], %[out]"
-        : [out] "=r" (-> u64),
-        : [src] "r" (src),
-          [mask] "r" (mask),
-    );
+    if (builtin.cpu.has(.x86, .bmi2)) {
+        return asm ("pext %[mask], %[src], %[out]"
+            : [out] "=r" (-> u64),
+            : [src] "r" (src),
+              [mask] "r" (mask),
+        );
+    }
+    @panic("BMI2 is not available");
 }
 
 pub fn parseNextInt(parts: anytype, comptime T: type) ?T {
