@@ -103,16 +103,16 @@ engines play each opening from both colors.
 
 ## Code map
 
-- [`src/position.zig`](src/position.zig) — position state, legal moves, and
+- [`src/position.zig`](src/position.zig): position state, legal moves, and
   make/unmake
-- [`src/search.zig`](src/search.zig) — iterative deepening, alpha-beta, pruning,
+- [`src/search.zig`](src/search.zig): iterative deepening, alpha-beta, pruning,
   and time management
-- [`src/movepick.zig`](src/movepick.zig) — move ordering and static exchange
+- [`src/movepick.zig`](src/movepick.zig): move ordering and static exchange
   evaluation
-- [`src/eval.zig`](src/eval.zig) — handcrafted tapered evaluation
-- [`src/tt.zig`](src/tt.zig) — transposition table
-- [`src/uci.zig`](src/uci.zig) — UCI command loop
-- [`src/perft.zig`](src/perft.zig) — perft driver
+- [`src/eval.zig`](src/eval.zig): handcrafted tapered evaluation
+- [`src/tt.zig`](src/tt.zig): transposition table
+- [`src/uci.zig`](src/uci.zig): UCI command loop
+- [`src/perft.zig`](src/perft.zig): perft driver
 
 ## Acknowledgements
 
@@ -136,8 +136,7 @@ documentation changes have been made with AI assistance.
 
 ## Releases
 
-The release workflow is triggered by tags beginning with `v`. A release tag can
-be created with:
+The release workflow is triggered by tags beginning with `v`.
 
 Tagged builds are configured for Linux x86-64 and ARM64, Windows x86-64, and
 macOS on Intel and Apple Silicon.
